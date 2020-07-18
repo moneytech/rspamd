@@ -282,11 +282,13 @@ LUA_FUNCTION_DEF (config, get_symbol_flags);
 LUA_FUNCTION_DEF (config, add_symbol_flags);
 
 /**
- * @method rspamd_config:register_re_selector(name, selector_str)
+ * @method rspamd_config:register_re_selector(name, selector_str, [delimiter, [flatten]])
  * Registers selector with the specific name to use in regular expressions in form
  * name=/re/$ or name=/re/{selector}
  * @param {string} name name of the selector
- * @param {selector_str} selector string
+ * @param {string} selector_str selector definition
+ * @param {string} delimiter delimiter to use when joining strings if flatten is false
+ * @param {bool} flatten if true then selector will return a table of captures instead of a single string
  * @return true if selector has been registered
  */
 LUA_FUNCTION_DEF (config, register_re_selector);
@@ -1267,24 +1269,45 @@ lua_metric_symbol_callback (struct rspamd_task *task,
 
 					for (i = level + first_opt; i <= last_pos; i++) {
 						if (lua_type (L, i) == LUA_TSTRING) {
-							const char *opt = lua_tostring (L, i);
+							gsize optlen;
+							const char *opt = lua_tolstring (L, i, &optlen);
 
-							rspamd_task_add_result_option (task, s, opt);
+							rspamd_task_add_result_option (task, s, opt, optlen);
+						}
+						else if (lua_type (L, i) == LUA_TUSERDATA) {
+							struct rspamd_lua_text *t = lua_check_text (L, i);
+
+							if (t) {
+								rspamd_task_add_result_option (task, s, t->start,
+										t->len);
+							}
 						}
 						else if (lua_type (L, i) == LUA_TTABLE) {
-							lua_pushvalue (L, i);
+							gsize objlen = rspamd_lua_table_size (L, i);
 
-							for (lua_pushnil (L); lua_next (L, -2); lua_pop (L, 1)) {
-								const char *opt = lua_tostring (L, -1);
+							for (guint j = 1; j <= objlen; j ++) {
+								lua_rawgeti (L, i, j);
 
-								rspamd_task_add_result_option (task, s, opt);
+								if (lua_type (L, -1) == LUA_TSTRING) {
+									gsize optlen;
+									const char *opt = lua_tolstring (L, -1, &optlen);
+
+									rspamd_task_add_result_option (task, s, opt, optlen);
+								}
+								else if (lua_type (L, -1) == LUA_TUSERDATA) {
+									struct rspamd_lua_text *t = lua_check_text (L, -1);
+
+									if (t) {
+										rspamd_task_add_result_option (task, s, t->start,
+												t->len);
+									}
+								}
+
+								lua_pop (L, 1);
 							}
-
-							lua_pop (L, 1);
 						}
 					}
 				}
-
 			}
 
 			lua_pop (L, nresults);
@@ -1403,20 +1426,42 @@ lua_metric_symbol_callback_return (struct thread_entry *thread_entry, int ret)
 
 				for (i = cd->stack_level + first_opt; i <= last_pos; i++) {
 					if (lua_type (L, i) == LUA_TSTRING) {
-						const char *opt = lua_tostring (L, i);
+						gsize optlen;
+						const char *opt = lua_tolstring (L, i, &optlen);
 
-						rspamd_task_add_result_option (task, s, opt);
+						rspamd_task_add_result_option (task, s, opt, optlen);
+					}
+					else if (lua_type (L, i) == LUA_TUSERDATA) {
+						struct rspamd_lua_text *t = lua_check_text (L, i);
+
+						if (t) {
+							rspamd_task_add_result_option (task, s, t->start,
+									t->len);
+						}
 					}
 					else if (lua_type (L, i) == LUA_TTABLE) {
-						lua_pushvalue (L, i);
+						gsize objlen = rspamd_lua_table_size (L, i);
 
-						for (lua_pushnil (L); lua_next (L, -2); lua_pop (L, 1)) {
-							const char *opt = lua_tostring (L, -1);
+						for (guint j = 1; j <= objlen; j ++) {
+							lua_rawgeti (L, i, j);
 
-							rspamd_task_add_result_option (task, s, opt);
+							if (lua_type (L, -1) == LUA_TSTRING) {
+								gsize optlen;
+								const char *opt = lua_tolstring (L, -1, &optlen);
+
+								rspamd_task_add_result_option (task, s, opt, optlen);
+							}
+							else if (lua_type (L, -1) == LUA_TUSERDATA) {
+								struct rspamd_lua_text *t = lua_check_text (L, -1);
+
+								if (t) {
+									rspamd_task_add_result_option (task, s, t->start,
+											t->len);
+								}
+							}
+
+							lua_pop (L, 1);
 						}
-
-						lua_pop (L, 1);
 					}
 				}
 			}
@@ -1769,18 +1814,24 @@ lua_parse_symbol_type (const gchar *str)
 				str = vec[i];
 
 				if (g_ascii_strcasecmp (str, "virtual") == 0) {
-					ret = SYMBOL_TYPE_VIRTUAL;
+					ret |= SYMBOL_TYPE_VIRTUAL;
+					ret &= ~SYMBOL_TYPE_NORMAL;
+					ret &= ~SYMBOL_TYPE_CALLBACK;
 				} else if (g_ascii_strcasecmp (str, "callback") == 0) {
-					ret = SYMBOL_TYPE_CALLBACK;
+					ret |= SYMBOL_TYPE_CALLBACK;
+					ret &= ~SYMBOL_TYPE_NORMAL;
+					ret &= ~SYMBOL_TYPE_VIRTUAL;
 				} else if (g_ascii_strcasecmp (str, "normal") == 0) {
-					ret = SYMBOL_TYPE_NORMAL;
+					ret |= SYMBOL_TYPE_NORMAL;
+					ret &= ~SYMBOL_TYPE_CALLBACK;
+					ret &= ~SYMBOL_TYPE_VIRTUAL;
 				} else if (g_ascii_strcasecmp (str, "prefilter") == 0) {
-					ret = SYMBOL_TYPE_PREFILTER | SYMBOL_TYPE_GHOST;
+					ret |= SYMBOL_TYPE_PREFILTER | SYMBOL_TYPE_GHOST;
 				} else if (g_ascii_strcasecmp (str, "postfilter") == 0) {
-					ret = SYMBOL_TYPE_POSTFILTER | SYMBOL_TYPE_GHOST;
+					ret |= SYMBOL_TYPE_POSTFILTER | SYMBOL_TYPE_GHOST;
 				} else if (g_ascii_strcasecmp (str, "idempotent") == 0) {
-					ret = SYMBOL_TYPE_POSTFILTER | SYMBOL_TYPE_GHOST |
-							SYMBOL_TYPE_IDEMPOTENT;
+					ret |= SYMBOL_TYPE_POSTFILTER | SYMBOL_TYPE_GHOST |
+							SYMBOL_TYPE_IDEMPOTENT | SYMBOL_TYPE_CALLBACK;
 				} else {
 					gint fl = 0;
 
@@ -1999,16 +2050,9 @@ lua_config_register_symbol (lua_State * L)
 				nshots = 1;
 			}
 
-			if (!isnan (score)) {
-				rspamd_config_add_symbol (cfg, name,
-						score, description, group, flags,
-						0, nshots);
-			}
-			else {
-				rspamd_config_add_symbol (cfg, name,
-						0.0, description, group, flags,
-						0, nshots);
-			}
+			rspamd_config_add_symbol (cfg, name,
+					score, description, group, flags,
+					0, nshots);
 
 			lua_pushstring (L, "groups");
 			lua_gettable (L, 2);
@@ -2271,7 +2315,7 @@ lua_config_set_metric_symbol (lua_State * L)
 	struct rspamd_config *cfg = lua_check_config (L, 1);
 	const gchar *description = NULL,
 			*group = NULL, *name = NULL, *flags_str = NULL;
-	double weight;
+	double score;
 	gboolean one_shot = FALSE, one_param = FALSE;
 	GError *err = NULL;
 	gdouble priority = 0.0;
@@ -2286,7 +2330,7 @@ lua_config_set_metric_symbol (lua_State * L)
 					"*name=S;score=N;description=S;"
 					"group=S;one_shot=B;one_param=B;priority=N;flags=S;"
 					"nshots=I",
-					&name, &weight, &description,
+					&name, &score, &description,
 					&group, &one_shot, &one_param,
 					&priority, &flags_str, &nshots)) {
 				msg_err_config ("bad arguments: %e", err);
@@ -2297,7 +2341,7 @@ lua_config_set_metric_symbol (lua_State * L)
 		}
 		else {
 			name = luaL_checkstring (L, 2);
-			weight = luaL_checknumber (L, 3);
+			score = luaL_checknumber (L, 3);
 
 			if (lua_gettop (L) > 3 && lua_type (L, 4) == LUA_TSTRING) {
 				description = luaL_checkstring (L, 4);
@@ -2337,7 +2381,7 @@ lua_config_set_metric_symbol (lua_State * L)
 		}
 
 		rspamd_config_add_symbol (cfg, name,
-				weight, description, group, flags, (guint) priority, nshots);
+				score, description, group, flags, (guint) priority, nshots);
 
 
 		if (lua_type (L, 2) == LUA_TTABLE) {
@@ -2743,7 +2787,8 @@ lua_config_newindex (lua_State *L)
 			 * Now check if a symbol has not been registered in any metric and
 			 * insert default value if applicable
 			 */
-			if (g_hash_table_lookup (cfg->symbols, name) == NULL) {
+			struct rspamd_symbol *sym = g_hash_table_lookup (cfg->symbols, name);
+			if (sym == NULL || (sym->flags & RSPAMD_SYMBOL_FLAG_UNSCORED)) {
 				nshots = cfg->default_max_shots;
 
 				lua_pushstring (L, "score");
@@ -2751,6 +2796,10 @@ lua_config_newindex (lua_State *L)
 				if (lua_type (L, -1) == LUA_TNUMBER) {
 					score = lua_tonumber (L, -1);
 
+					if (sym) {
+						/* Reset unscored flag */
+						sym->flags &= ~RSPAMD_SYMBOL_FLAG_UNSCORED;
+					}
 				}
 				lua_pop (L, 1);
 
@@ -2800,7 +2849,7 @@ lua_config_newindex (lua_State *L)
 					}
 					else if (group) {
 						/* Add with zero score */
-						rspamd_config_add_symbol (cfg, name, 0.0,
+						rspamd_config_add_symbol (cfg, name, NAN,
 								description, group, flags, 0, nshots);
 					}
 
@@ -3740,6 +3789,30 @@ lua_config_register_finish_script (lua_State *L)
 	return 0;
 }
 
+static inline bool
+rspamd_lua_config_check_settings_symbols_object (const ucl_object_t *obj)
+{
+	if (obj == NULL) {
+		/* Semantically valid */
+		return true;
+	}
+
+	if (ucl_object_type (obj) == UCL_OBJECT) {
+		/* Key-value mapping - should be okay */
+		return true;
+	}
+
+	if (ucl_object_type (obj) == UCL_ARRAY) {
+		/* Okay if empty */
+		if (obj->len == 0) {
+			return true;
+		}
+	}
+
+	/* Everything else not okay */
+	return false;
+}
+
 static gint
 lua_config_register_settings_id (lua_State *L)
 {
@@ -3753,7 +3826,7 @@ lua_config_register_settings_id (lua_State *L)
 
 		sym_enabled = ucl_object_lua_import (L, 3);
 
-		if (sym_enabled != NULL && ucl_object_type (sym_enabled) != UCL_OBJECT) {
+		if (!rspamd_lua_config_check_settings_symbols_object (sym_enabled)) {
 			ucl_object_unref (sym_enabled);
 
 			return luaL_error (L, "invalid symbols enabled");
@@ -3761,7 +3834,7 @@ lua_config_register_settings_id (lua_State *L)
 
 		sym_disabled = ucl_object_lua_import (L, 4);
 
-		if (sym_disabled != NULL && ucl_object_type (sym_disabled) != UCL_OBJECT) {
+		if (!rspamd_lua_config_check_settings_symbols_object (sym_disabled)) {
 			ucl_object_unref (sym_enabled);
 			ucl_object_unref (sym_disabled);
 
@@ -4214,7 +4287,7 @@ lua_config_init_modules (lua_State *L)
 
 	if (cfg != NULL) {
 		rspamd_lua_post_load_config (cfg);
-		lua_pushboolean (L, rspamd_init_filters (cfg, FALSE));
+		lua_pushboolean (L, rspamd_init_filters (cfg, false, false));
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
@@ -4239,7 +4312,7 @@ lua_config_init_subsystem (lua_State *L)
 		for (i = 0; i < nparts; i ++) {
 			if (strcmp (parts[i], "filters") == 0) {
 				rspamd_lua_post_load_config (cfg);
-				rspamd_init_filters (cfg, FALSE);
+				rspamd_init_filters (cfg, false, false);
 			}
 			else if (strcmp (parts[i], "langdet") == 0) {
 				if (!cfg->lang_det) {
@@ -4256,7 +4329,7 @@ lua_config_init_subsystem (lua_State *L)
 				struct ev_loop *ev_base = lua_check_ev_base (L, 3);
 
 				if (ev_base) {
-					cfg->dns_resolver = rspamd_dns_resolver_init (rspamd_logger_get_singleton (),
+					cfg->dns_resolver = rspamd_dns_resolver_init (rspamd_log_default_logger (),
 							ev_base,
 							cfg);
 				}
@@ -4290,12 +4363,17 @@ lua_config_register_re_selector (lua_State *L)
 	const gchar *name = luaL_checkstring (L, 2);
 	const gchar *selector_str = luaL_checkstring (L, 3);
 	const gchar *delimiter = "";
+	bool flatten = false;
 	gint top = lua_gettop (L);
 	bool res = false;
 
 	if (cfg && name && selector_str) {
 		if (lua_gettop (L) >= 4) {
 			delimiter = luaL_checkstring (L, 4);
+
+			if (lua_isboolean (L, 5)) {
+				flatten = lua_toboolean (L, 5);
+			}
 		}
 
 		if (luaL_dostring (L, "return require \"lua_selectors\"") != 0) {
@@ -4332,8 +4410,9 @@ lua_config_register_re_selector (lua_State *L)
 					*pcfg = cfg;
 					lua_pushstring (L, selector_str);
 					lua_pushstring (L, delimiter);
+					lua_pushboolean (L, flatten);
 
-					if ((ret = lua_pcall (L, 3, 1, err_idx)) != 0) {
+					if ((ret = lua_pcall (L, 4, 1, err_idx)) != 0) {
 						msg_err_config ("call to create_selector_closure lua "
 										"script failed (%d): %s", ret,
 										lua_tostring (L, -1));

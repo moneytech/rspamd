@@ -1,6 +1,6 @@
 *** Settings ***
-Test Setup      Rules Setup
-Test Teardown   Rules Teardown
+Suite Setup      Rules Setup
+Suite Teardown   Rules Teardown
 Library         ${TESTDIR}/lib/rspamd.py
 Resource        ${TESTDIR}/lib/rspamd.robot
 Variables       ${TESTDIR}/lib/vars.py
@@ -15,8 +15,9 @@ ${MESSAGE4}      ${TESTDIR}/messages/broken_richtext.eml
 ${MESSAGE5}      ${TESTDIR}/messages/badboundary.eml
 ${MESSAGE6}      ${TESTDIR}/messages/pdf_encrypted.eml
 ${MESSAGE7}      ${TESTDIR}/messages/pdf_js.eml
+${MESSAGE8}      ${TESTDIR}/messages/yand_forward.eml
 ${URL_TLD}       ${TESTDIR}/../lua/unit/test_tld.dat
-${RSPAMD_SCOPE}  Test
+${RSPAMD_SCOPE}  Suite
 
 
 *** Test Cases ***
@@ -54,6 +55,34 @@ PDF encrypted
 PDF javascript
   ${result} =  Scan Message With Rspamc  ${MESSAGE7}
   Check Rspamc  ${result}  PDF_JAVASCRIPT
+
+BITCOIN ADDR
+  ${result} =  Scan Message With Rspamc  ${TESTDIR}/messages/btc.eml
+  Should Contain  ${result.stdout}  BITCOIN_ADDR
+
+BITCOIN ADDR 2
+  ${result} =  Scan Message With Rspamc  ${TESTDIR}/messages/btc2.eml
+  Should Contain  ${result.stdout}  BITCOIN_ADDR
+
+BITCOIN ADDR 3
+  ${result} =  Scan Message With Rspamc  ${TESTDIR}/messages/btc3.eml
+  Should Contain  ${result.stdout}  BITCOIN_ADDR  
+
+RCVD_COUNT_ONE
+  ${result} =  Scan Message With Rspamc  ${TESTDIR}/messages/btc.eml
+  Should Contain  ${result.stdout}  RCVD_COUNT_ONE
+
+RCVD_COUNT_FIVE
+  ${result} =  Scan Message With Rspamc  ${TESTDIR}/messages/yand_forward.eml
+  Should Contain  ${result.stdout}  RCVD_COUNT_FIVE
+
+RCVD_COUNT_SEVEN
+  ${result} =  Scan Message With Rspamc  ${TESTDIR}/messages/rcvd7.eml
+  Should Contain  ${result.stdout}  RCVD_COUNT_SEVEN
+
+FROM_NEQ_ENVFROM
+  ${result} =  Scan Message With Rspamc  ${MESSAGE8}  --from  test@test.net
+  Check Rspamc  ${result}  FROM_NEQ_ENVFROM
 
 
 *** Keywords ***

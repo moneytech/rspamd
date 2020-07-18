@@ -197,6 +197,36 @@ rspamd_lua_setclass (lua_State * L, const gchar *classname, gint objidx)
 	lua_setmetatable (L, objidx);
 }
 
+void
+rspamd_lua_class_metatable (lua_State *L, const gchar *classname)
+{
+	khiter_t k;
+
+	k = kh_get (lua_class_set, lua_classes, classname);
+
+	g_assert (k != kh_end (lua_classes));
+	lua_rawgetp (L, LUA_REGISTRYINDEX,
+			RSPAMD_LIGHTUSERDATA_MASK (kh_key (lua_classes, k)));
+}
+
+void
+rspamd_lua_add_metamethod (lua_State *L, const gchar *classname,
+								luaL_Reg *meth)
+{
+	khiter_t k;
+
+	k = kh_get (lua_class_set, lua_classes, classname);
+
+	g_assert (k != kh_end (lua_classes));
+	/* get metatable identified by pointer */
+	lua_rawgetp (L, LUA_REGISTRYINDEX,
+			RSPAMD_LIGHTUSERDATA_MASK (kh_key (lua_classes, k)));
+
+	lua_pushcfunction (L, meth->func);
+	lua_setfield (L, -2, meth->name);
+	lua_pop (L, 1); /* remove metatable */
+}
+
 /* assume that table is at the top */
 void
 rspamd_lua_table_set (lua_State * L, const gchar *index, const gchar *value)
@@ -1075,7 +1105,7 @@ rspamd_plugins_table_push_elt (lua_State *L, const gchar *field_name,
 }
 
 gboolean
-rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load)
+rspamd_init_lua_filters (struct rspamd_config *cfg, bool force_load, bool strict)
 {
 	struct rspamd_config **pcfg;
 	GList *cur;
@@ -1119,6 +1149,10 @@ rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load)
 				rspamd_plugins_table_push_elt (L, "disabled_failed",
 						module->name);
 
+				if (strict) {
+					return FALSE;
+				}
+
 				cur = g_list_next (cur);
 				continue;
 			}
@@ -1143,6 +1177,10 @@ rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load)
 				munmap (data, fsize);
 				g_free (lua_fname);
 
+				if (strict) {
+					return FALSE;
+				}
+
 				cur = g_list_next (cur);
 				continue;
 			}
@@ -1158,6 +1196,10 @@ rspamd_init_lua_filters (struct rspamd_config *cfg, gboolean force_load)
 				lua_settop (L, err_idx - 1);
 				rspamd_plugins_table_push_elt (L, "disabled_failed",
 						module->name);
+
+				if (strict) {
+					return FALSE;
+				}
 
 				cur = g_list_next (cur);
 				continue;
@@ -1406,6 +1448,38 @@ rspamd_lua_parse_table_arguments (lua_State *L, gint pos,
 							1,
 							"bad type for key:"
 									" %.*s: '%s', '%s' is expected",
+							(gint) keylen,
+							key,
+							lua_typename (L, lua_type (L, idx)),
+							"int64");
+					va_end (ap);
+
+					return FALSE;
+				}
+				if (is_table) {
+					lua_pop (L, 1);
+				}
+				break;
+
+			case 'i':
+				if (t == LUA_TNUMBER) {
+					*(va_arg (ap, gint32 *)) = lua_tointeger (L, idx);
+				}
+				else if (t == LUA_TNIL || t == LUA_TNONE) {
+					failed = TRUE;
+					if (how != RSPAMD_LUA_PARSE_ARGUMENTS_IGNORE_MISSING) {
+						*(va_arg (ap, gint32 *)) = 0;
+					}
+					else {
+						(void)va_arg (ap, gint32 *);
+					}
+				}
+				else {
+					g_set_error (err,
+							lua_error_quark (),
+							1,
+							"bad type for key:"
+							" %.*s: '%s', '%s' is expected",
 							(gint) keylen,
 							key,
 							lua_typename (L, lua_type (L, idx)),
@@ -2347,3 +2421,134 @@ rspamd_lua_push_words (lua_State *L, GArray *words,
 
 	return 1;
 }
+
+gchar *
+rspamd_lua_get_module_name (lua_State *L)
+{
+	lua_Debug d;
+	gchar *p;
+	gchar func_buf[128];
+
+	if (lua_getstack (L, 1, &d) == 1) {
+		(void) lua_getinfo (L, "Sl", &d);
+		if ((p = strrchr (d.short_src, '/')) == NULL) {
+			p = d.short_src;
+		}
+		else {
+			p++;
+		}
+
+		if (strlen (p) > 20) {
+			rspamd_snprintf (func_buf, sizeof (func_buf), "%10s...]:%d", p,
+					d.currentline);
+		}
+		else {
+			rspamd_snprintf (func_buf, sizeof (func_buf), "%s:%d", p,
+					d.currentline);
+		}
+
+		return g_strdup (func_buf);
+	}
+
+	return NULL;
+}
+
+bool
+rspamd_lua_universal_pcall (lua_State *L, gint cbref, const gchar* strloc,
+								 gint nret, const gchar *args, GError **err, ...)
+{
+	va_list ap;
+	const gchar *argp = args, *classname;
+	gint err_idx, nargs = 0;
+	gpointer *cls_ptr;
+	gsize sz;
+
+	/* Error function */
+	lua_pushcfunction (L, &rspamd_lua_traceback);
+	err_idx = lua_gettop (L);
+
+	va_start (ap, err);
+	/* Called function */
+	lua_rawgeti (L, LUA_REGISTRYINDEX, cbref);
+	/*
+	 * Possible arguments
+	 * - i - lua_integer, argument - gint64
+	 * - n - lua_number, argument - gdouble
+	 * - s - lua_string, argument - const gchar * (zero terminated)
+	 * - l - lua_lstring, argument - (size_t + const gchar *) pair
+	 * - u - lua_userdata, argument - (const char * + void *) - classname + pointer
+	 * - b - lua_boolean, argument - gboolean (not bool due to varargs promotion)
+	 * - f - lua_function, argument - int - position of the function on stack (not lua_registry)
+	 */
+	while (*argp) {
+		switch (*argp) {
+		case 'i':
+			lua_pushinteger (L, va_arg (ap, gint64));
+			nargs ++;
+			break;
+		case 'n':
+			lua_pushnumber (L, va_arg (ap, gdouble));
+			nargs ++;
+			break;
+		case 's':
+			lua_pushstring (L, va_arg (ap, const gchar *));
+			nargs ++;
+			break;
+		case 'l':
+			sz = va_arg (ap, gsize);
+			lua_pushlstring (L, va_arg (ap, const gchar *), sz);
+			nargs ++;
+			break;
+		case 'b':
+			lua_pushboolean (L, va_arg (ap, gboolean));
+			nargs ++;
+			break;
+		case 'u':
+			classname = va_arg (ap, const gchar *);
+			cls_ptr = (gpointer *)lua_newuserdata (L, sizeof (gpointer));
+			*cls_ptr = va_arg (ap, gpointer);
+			rspamd_lua_setclass (L, classname, -1);
+			nargs ++;
+			break;
+		case 'f':
+			lua_pushvalue (L, va_arg (ap, gint));
+			nargs ++;
+			break;
+		default:
+			lua_settop (L, err_idx - 1);
+			g_set_error (err, lua_error_quark (), EINVAL,
+					"invalid argument character: %c at %s",
+					*argp, argp);
+
+			return false;
+		}
+
+		argp ++;
+	}
+
+	if (lua_pcall (L, nargs, nret, err_idx) != 0) {
+		g_set_error (err, lua_error_quark (), EBADF,
+				"error when calling lua function from %s: %s",
+				strloc, lua_tostring (L, -1));
+		lua_settop (L, err_idx - 1);
+
+		return false;
+	}
+
+	lua_remove (L, err_idx);
+	va_end (ap);
+
+	return true;
+}
+
+#if defined( LUA_VERSION_NUM ) && LUA_VERSION_NUM <= 502
+gint
+rspamd_lua_geti (lua_State *L, int pos, int i)
+{
+	pos = lua_absindex (L, pos);
+	lua_pushinteger (L, i);
+	lua_gettable (L, pos);
+
+	return lua_type (L, -1);
+}
+#endif

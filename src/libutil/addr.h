@@ -44,10 +44,19 @@ extern "C" {
  */
 typedef struct rspamd_inet_addr_s rspamd_inet_addr_t;
 
-struct rspamd_radix_map_helper;
-
-struct rspamd_radix_map_helper **rspamd_inet_library_init (void);
-
+/**
+ * Returns pointer storage for global singleton (map for local addresses)
+ * @return
+ */
+void **rspamd_inet_library_init (void);
+/**
+ * Returns local addresses singleton
+ * @return
+ */
+void *rspamd_inet_library_get_lib_ctx (void);
+/**
+ * Cleanup library (currently it does nothing)
+ */
 void rspamd_inet_library_destroy (void);
 
 /**
@@ -77,7 +86,7 @@ rspamd_inet_addr_t *rspamd_inet_address_from_rnds (
 
 /**
  * Parse string with ipv6 address of length `len` to `target` which should be
- * at least sizeof (in6_addr_t)
+ * at least sizeof (struct in6_addr)
  * @param text input string
  * @param len length of `text` (if 0, then `text` must be zero terminated)
  * @param target target structure
@@ -219,15 +228,22 @@ void rspamd_inet_address_set_port (rspamd_inet_addr_t *addr, uint16_t port);
 int rspamd_inet_address_connect (const rspamd_inet_addr_t *addr, gint type,
 								 gboolean async);
 
+enum rspamd_inet_address_listen_opts {
+	RSPAMD_INET_ADDRESS_LISTEN_DEFAULT = 0,
+	RSPAMD_INET_ADDRESS_LISTEN_ASYNC = (1u << 0u),
+	RSPAMD_INET_ADDRESS_LISTEN_REUSEPORT = (1u << 1u),
+	RSPAMD_INET_ADDRESS_LISTEN_NOLISTEN = (1u << 2u),
+};
 /**
  * Listen on a specified inet address
  * @param addr
  * @param type
- * @param async
+ * @param opts
  * @return
  */
 int rspamd_inet_address_listen (const rspamd_inet_addr_t *addr, gint type,
-								gboolean async);
+								enum rspamd_inet_address_listen_opts opts,
+								gint listen_queue);
 
 /**
  * Check whether specified ip is valid (not INADDR_ANY or INADDR_NONE) for ipv4 or ipv6
@@ -265,7 +281,9 @@ enum rspamd_parse_host_port_result {
 enum rspamd_parse_host_port_result
 rspamd_parse_host_port_priority (const gchar *str,
 								 GPtrArray **addrs,
-								 guint *priority, gchar **name, guint default_port,
+								 guint *priority, gchar **name,
+								 guint default_port,
+								 gboolean allow_listen,
 								 rspamd_mempool_t *pool);
 
 /**
@@ -323,8 +341,7 @@ gboolean rspamd_inet_address_port_equal (gconstpointer a, gconstpointer b);
 /**
  * Returns TRUE if an address belongs to some local address
  */
-gboolean rspamd_inet_address_is_local (const rspamd_inet_addr_t *addr,
-									   gboolean check_laddrs);
+gboolean rspamd_inet_address_is_local (const rspamd_inet_addr_t *addr);
 
 /**
  * Returns size of storage required to store a complete IP address

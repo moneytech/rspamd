@@ -16,7 +16,6 @@
 #include "config.h"
 #include "addr.h"
 #include "util.h"
-#include "map_helpers.h"
 #include "logger.h"
 #include "cryptobox.h"
 #include "unix-std.h"
@@ -29,7 +28,7 @@
 #include <grp.h>
 #endif
 
-static struct rspamd_radix_map_helper *local_addrs;
+static void *local_addrs;
 
 enum {
 	RSPAMD_IPV6_UNDEFINED = 0,
@@ -146,34 +145,33 @@ static void
 rspamd_ip_check_ipv6 (void)
 {
 	if (ipv6_status == RSPAMD_IPV6_UNDEFINED) {
-		gint s, r;
-		struct sockaddr_in6 sin6;
-		const struct in6_addr ip6_local = IN6ADDR_LOOPBACK_INIT;
+		gint s;
 
 		s = socket (AF_INET6, SOCK_STREAM, 0);
+
 		if (s == -1) {
 			ipv6_status = RSPAMD_IPV6_UNSUPPORTED;
 		}
 		else {
 			/*
-			 * Some systems allow ipv6 sockets creating but not binding,
-			 * so here we try to bind to some local address and check, whether it
-			 * is possible
+			 * Try to check /proc if we are on Linux (the common case)
 			 */
-			memset (&sin6, 0, sizeof (sin6));
-			sin6.sin6_family = AF_INET6;
-			sin6.sin6_port = rspamd_random_uint64_fast () % 40000 + 20000;
-			sin6.sin6_addr = ip6_local;
-
-			r = bind (s, (struct sockaddr *)&sin6, sizeof (sin6));
-			if (r == -1 && errno != EADDRINUSE) {
-				ipv6_status = RSPAMD_IPV6_UNSUPPORTED;
-			}
-			else {
-				ipv6_status = RSPAMD_IPV6_SUPPORTED;
-			}
+			struct stat st;
 
 			close (s);
+
+			if (stat ("/proc/net/dev", &st) != -1) {
+				if (stat ("/proc/net/if_inet6", &st) != -1) {
+					ipv6_status = RSPAMD_IPV6_SUPPORTED;
+				}
+				else {
+					ipv6_status = RSPAMD_IPV6_UNSUPPORTED;
+				}
+			}
+			else {
+				/* Not a Linux, so we assume it supports ipv6 somehow... */
+				ipv6_status = RSPAMD_IPV6_SUPPORTED;
+			}
 		}
 	}
 }
@@ -1044,10 +1042,11 @@ rspamd_inet_address_connect (const rspamd_inet_addr_t *addr, gint type,
 
 int
 rspamd_inet_address_listen (const rspamd_inet_addr_t *addr, gint type,
-		gboolean async)
+							enum rspamd_inet_address_listen_opts opts,
+							gint listen_queue)
 {
 	gint fd, r;
-	gint on = 1;
+	gint on = 1, serrno;
 	const struct sockaddr *sa;
 	const char *path;
 
@@ -1055,7 +1054,8 @@ rspamd_inet_address_listen (const rspamd_inet_addr_t *addr, gint type,
 		return -1;
 	}
 
-	fd = rspamd_socket_create (addr->af, type, 0, async);
+	fd = rspamd_socket_create (addr->af, type, 0,
+			(opts & RSPAMD_INET_ADDRESS_LISTEN_ASYNC));
 	if (fd == -1) {
 		return -1;
 	}
@@ -1072,7 +1072,27 @@ rspamd_inet_address_listen (const rspamd_inet_addr_t *addr, gint type,
 		sa = &addr->u.in.addr.sa;
 	}
 
-	(void)setsockopt (fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&on, sizeof (gint));
+#if defined(SO_REUSEADDR)
+	if (setsockopt (fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&on, sizeof (gint)) == -1) {
+		msg_err ("cannot set SO_REUSEADDR on %s (fd=%d): %s",
+				rspamd_inet_address_to_string_pretty (addr),
+				fd, strerror (errno));
+		goto err;
+	}
+#endif
+
+#if defined(SO_REUSEPORT) && defined(LINUX)
+	if (opts & RSPAMD_INET_ADDRESS_LISTEN_REUSEPORT) {
+		on = 1;
+
+		if (setsockopt (fd, SOL_SOCKET, SO_REUSEPORT, (const void *)&on, sizeof (gint)) == -1) {
+			msg_err ("cannot set SO_REUSEPORT on %s (fd=%d): %s",
+					rspamd_inet_address_to_string_pretty (addr),
+					fd, strerror (errno));
+			goto err;
+		}
+	}
+#endif
 
 #ifdef HAVE_IPV6_V6ONLY
 	if (addr->af == AF_INET6) {
@@ -1088,47 +1108,62 @@ rspamd_inet_address_listen (const rspamd_inet_addr_t *addr, gint type,
 
 	r = bind (fd, sa, addr->slen);
 	if (r == -1) {
-		if (!async || errno != EINPROGRESS) {
-			close (fd);
+		if (!(opts & RSPAMD_INET_ADDRESS_LISTEN_ASYNC) || errno != EINPROGRESS) {
 			msg_warn ("bind %s failed: %d, '%s'",
 					rspamd_inet_address_to_string_pretty (addr),
 					errno,
 					strerror (errno));
-			return -1;
+
+			goto err;
+		}
+	}
+
+	if (addr->af == AF_UNIX) {
+		path = addr->u.un->addr.sun_path;
+		/* Try to set mode and owner */
+
+		if (addr->u.un->owner != (uid_t)-1 || addr->u.un->group != (gid_t)-1) {
+			if (chown (path, addr->u.un->owner, addr->u.un->group) == -1) {
+				msg_info ("cannot change owner for %s to %d:%d: %s",
+						path, addr->u.un->owner, addr->u.un->group,
+						strerror (errno));
+			}
+		}
+
+		if (chmod (path, addr->u.un->mode) == -1) {
+			msg_info ("cannot change mode for %s to %od %s",
+					path, addr->u.un->mode, strerror (errno));
 		}
 	}
 
 	if (type != (int)SOCK_DGRAM) {
 
-		if (addr->af == AF_UNIX) {
-			path = addr->u.un->addr.sun_path;
-			/* Try to set mode and owner */
+		if (!(opts & RSPAMD_INET_ADDRESS_LISTEN_NOLISTEN)) {
+			r = listen (fd, listen_queue);
 
-			if (addr->u.un->owner != (uid_t)-1 || addr->u.un->group != (gid_t)-1) {
-				if (chown (path, addr->u.un->owner, addr->u.un->group) == -1) {
-					msg_info ("cannot change owner for %s to %d:%d: %s",
-							path, addr->u.un->owner, addr->u.un->group,
-							strerror (errno));
-				}
+			if (r == -1) {
+				msg_warn ("listen %s failed: %d, '%s'",
+						rspamd_inet_address_to_string_pretty (addr),
+						errno, strerror (errno));
+
+				goto err;
 			}
-
-			if (chmod (path, addr->u.un->mode) == -1) {
-				msg_info ("cannot change mode for %s to %od %s",
-						path, addr->u.un->mode, strerror (errno));
-			}
-		}
-		r = listen (fd, -1);
-
-		if (r == -1) {
-			msg_warn ("listen %s failed: %d, '%s'",
-					rspamd_inet_address_to_string_pretty (addr),
-					errno, strerror (errno));
-			close (fd);
-			return -1;
 		}
 	}
 
 	return fd;
+
+err:
+	/* Error path */
+	serrno = errno;
+
+	if (fd != -1) {
+		close (fd);
+	}
+
+	errno = serrno;
+
+	return -1;
 }
 
 gssize
@@ -1347,6 +1382,7 @@ rspamd_parse_host_port_priority (const gchar *str,
 								 guint *priority,
 								 gchar **name_ptr,
 								 guint default_port,
+								 gboolean allow_listen,
 								 rspamd_mempool_t *pool)
 {
 	gchar portbuf[8];
@@ -1354,6 +1390,7 @@ rspamd_parse_host_port_priority (const gchar *str,
 	gsize namelen;
 	rspamd_inet_addr_t *cur_addr = NULL;
 	enum rspamd_parse_host_port_result ret = RSPAMD_PARSE_ADDR_FAIL;
+	union sa_union su;
 
 	/*
 	 * In this function, we can have several possibilities:
@@ -1363,19 +1400,62 @@ rspamd_parse_host_port_priority (const gchar *str,
 	 * 4) ip|host[:port[:priority]]
 	 */
 
-	if (str[0] == '*') {
-		if (!rspamd_check_port_priority (str + 1, default_port, priority,
+	if (allow_listen && str[0] == '*') {
+		bool v4_any = true, v6_any = true;
+
+		p = &str[1];
+
+		if (g_ascii_strncasecmp (p, "v4", 2) == 0) {
+			p += 2;
+			name = "*v4";
+			v6_any = false;
+		}
+		else if (g_ascii_strncasecmp (p, "v6", 2) == 0) {
+			p += 2;
+			name = "*v6";
+			v4_any = false;
+		}
+		else {
+			name = "*";
+		}
+
+		if (!rspamd_check_port_priority (p, default_port, priority,
 				portbuf, sizeof (portbuf), pool)) {
 			return ret;
 		}
 
-		if (rspamd_resolve_addrs (str, 0, addrs, portbuf, AI_PASSIVE, pool)
-				== RSPAMD_PARSE_ADDR_FAIL) {
-			return ret;
+		if (*addrs == NULL) {
+			*addrs = g_ptr_array_new_full (1,
+					(GDestroyNotify) rspamd_inet_address_free);
+
+			if (pool != NULL) {
+				rspamd_mempool_add_destructor (pool,
+						rspamd_ptr_array_free_hard, *addrs);
+			}
 		}
 
-		name = "*";
-		namelen = 1;
+		if (v4_any) {
+			cur_addr = rspamd_inet_addr_create (AF_INET, pool);
+			rspamd_parse_inet_address_ip4 ("0.0.0.0",
+					sizeof ("0.0.0.0") - 1, &su.s4.sin_addr);
+			memcpy (&cur_addr->u.in.addr.s4.sin_addr, &su.s4.sin_addr,
+					sizeof (struct in_addr));
+			rspamd_inet_address_set_port (cur_addr,
+					strtoul (portbuf, NULL, 10));
+			g_ptr_array_add (*addrs, cur_addr);
+		}
+		if (v6_any) {
+			cur_addr = rspamd_inet_addr_create (AF_INET6, pool);
+			rspamd_parse_inet_address_ip6 ("::",
+					sizeof ("::") - 1, &su.s6.sin6_addr);
+			memcpy (&cur_addr->u.in.addr.s6.sin6_addr, &su.s6.sin6_addr,
+					sizeof (struct in6_addr));
+			rspamd_inet_address_set_port (cur_addr,
+					strtoul (portbuf, NULL, 10));
+			g_ptr_array_add (*addrs, cur_addr);
+		}
+
+		namelen = strlen (name);
 		ret = RSPAMD_PARSE_ADDR_NUMERIC; /* No resolution here */
 	}
 	else if (str[0] == '[') {
@@ -1871,8 +1951,7 @@ rspamd_inet_address_port_equal (gconstpointer a, gconstpointer b)
 #endif
 
 gboolean
-rspamd_inet_address_is_local (const rspamd_inet_addr_t *addr,
-		gboolean check_laddrs)
+rspamd_inet_address_is_local (const rspamd_inet_addr_t *addr)
 {
 	if (addr == NULL) {
 		return FALSE;
@@ -1896,21 +1975,21 @@ rspamd_inet_address_is_local (const rspamd_inet_addr_t *addr,
 				return TRUE;
 			}
 		}
-
-		if (check_laddrs && local_addrs) {
-			if (rspamd_match_radix_map_addr (local_addrs, addr) != NULL) {
-				return TRUE;
-			}
-		}
 	}
 
 	return FALSE;
 }
 
-struct rspamd_radix_map_helper **
+void **
 rspamd_inet_library_init (void)
 {
 	return &local_addrs;
+}
+
+void *
+rspamd_inet_library_get_lib_ctx (void)
+{
+	return local_addrs;
 }
 
 void

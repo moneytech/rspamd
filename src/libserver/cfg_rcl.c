@@ -1952,6 +1952,12 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				0,
 				"Disable monitoring completely");
 		rspamd_rcl_add_default_handler (sub,
+				"fips_mode",
+				rspamd_rcl_parse_struct_boolean,
+				G_STRUCT_OFFSET (struct rspamd_config, fips_mode),
+				0,
+				"Enable FIPS 140-2 mode in OpenSSL");
+		rspamd_rcl_add_default_handler (sub,
 				"dynamic_conf",
 				rspamd_rcl_parse_struct_string,
 				G_STRUCT_OFFSET (struct rspamd_config, dynamic_conf),
@@ -1987,6 +1993,12 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				G_STRUCT_OFFSET (struct rspamd_config, public_groups_only),
 				0,
 				"Output merely public groups everywhere");
+		rspamd_rcl_add_default_handler (sub,
+				"enable_test_patterns",
+				rspamd_rcl_parse_struct_boolean,
+				G_STRUCT_OFFSET (struct rspamd_config, enable_test_patterns),
+				0,
+				"Enable test GTUBE like patterns (not for production!)");
 		rspamd_rcl_add_default_handler (sub,
 				"enable_experimental",
 				rspamd_rcl_parse_struct_boolean,
@@ -2222,6 +2234,18 @@ rspamd_rcl_config_init (struct rspamd_config *cfg, GHashTable *skip_sections)
 				G_STRUCT_OFFSET (struct rspamd_config, max_lua_urls),
 				RSPAMD_CL_FLAG_INT_32,
 				"Maximum count of URLs to pass to Lua to avoid DoS (default: 1024)");
+		rspamd_rcl_add_default_handler (sub,
+				"max_urls",
+				rspamd_rcl_parse_struct_integer,
+				G_STRUCT_OFFSET (struct rspamd_config, max_urls),
+				RSPAMD_CL_FLAG_INT_32,
+				"Maximum count of URLs to process to avoid DoS (default: 10240)");
+		rspamd_rcl_add_default_handler (sub,
+				"max_recipients",
+				rspamd_rcl_parse_struct_integer,
+				G_STRUCT_OFFSET (struct rspamd_config, max_recipients),
+				RSPAMD_CL_FLAG_INT_32,
+				"Maximum count of recipients to process to avoid DoS (default: 1024)");
 		rspamd_rcl_add_default_handler (sub,
 				"max_blas_threads",
 				rspamd_rcl_parse_struct_integer,
@@ -2836,11 +2860,17 @@ rspamd_rcl_parse_struct_string (rspamd_mempool_t *pool,
 		rspamd_snprintf (*target, num_str_len, "%s",
 				((gboolean)obj->value.iv) ? "true" : "false");
 		break;
+	case UCL_NULL:
+		/* String is enforced to be null */
+		*target = NULL;
+		break;
 	default:
 		g_set_error (err,
 			CFG_RCL_ERROR,
 			EINVAL,
-			"cannot convert object or array to string");
+			"cannot convert %s to string in option %s",
+			ucl_object_type_to_string (ucl_object_type (obj)),
+			ucl_object_key (obj));
 		return FALSE;
 	}
 
@@ -2869,9 +2899,11 @@ rspamd_rcl_parse_struct_integer (rspamd_mempool_t *pool,
 		target.i32p = (gint32 *)(((gchar *)pd->user_struct) + pd->offset);
 		if (!ucl_object_toint_safe (obj, &val)) {
 			g_set_error (err,
-				CFG_RCL_ERROR,
-				EINVAL,
-				"cannot convert param to integer");
+					CFG_RCL_ERROR,
+					EINVAL,
+					"cannot convert %s to integer in option %s",
+					ucl_object_type_to_string (ucl_object_type (obj)),
+					ucl_object_key (obj));
 			return FALSE;
 		}
 		*target.i32p = val;
@@ -2880,9 +2912,11 @@ rspamd_rcl_parse_struct_integer (rspamd_mempool_t *pool,
 		target.i64p = (gint64 *)(((gchar *)pd->user_struct) + pd->offset);
 		if (!ucl_object_toint_safe (obj, &val)) {
 			g_set_error (err,
-				CFG_RCL_ERROR,
-				EINVAL,
-				"cannot convert param to integer");
+					CFG_RCL_ERROR,
+					EINVAL,
+					"cannot convert %s to integer in option %s",
+					ucl_object_type_to_string (ucl_object_type (obj)),
+					ucl_object_key (obj));
 			return FALSE;
 		}
 		*target.i64p = val;
@@ -2891,9 +2925,11 @@ rspamd_rcl_parse_struct_integer (rspamd_mempool_t *pool,
 		target.sp = (gsize *)(((gchar *)pd->user_struct) + pd->offset);
 		if (!ucl_object_toint_safe (obj, &val)) {
 			g_set_error (err,
-				CFG_RCL_ERROR,
-				EINVAL,
-				"cannot convert param to integer");
+					CFG_RCL_ERROR,
+					EINVAL,
+					"cannot convert %s to integer in option %s",
+					ucl_object_type_to_string (ucl_object_type (obj)),
+					ucl_object_key (obj));
 			return FALSE;
 		}
 		*target.sp = val;
@@ -2902,9 +2938,11 @@ rspamd_rcl_parse_struct_integer (rspamd_mempool_t *pool,
 		target.i16p = (gint16 *)(((gchar *)pd->user_struct) + pd->offset);
 		if (!ucl_object_toint_safe (obj, &val)) {
 			g_set_error (err,
-				CFG_RCL_ERROR,
-				EINVAL,
-				"cannot convert param to integer");
+					CFG_RCL_ERROR,
+					EINVAL,
+					"cannot convert %s to integer in option %s",
+					ucl_object_type_to_string (ucl_object_type (obj)),
+					ucl_object_key (obj));
 			return FALSE;
 		}
 		*target.i16p = val;
@@ -2915,7 +2953,9 @@ rspamd_rcl_parse_struct_integer (rspamd_mempool_t *pool,
 			g_set_error (err,
 					CFG_RCL_ERROR,
 					EINVAL,
-					"cannot convert param to integer");
+					"cannot convert %s to integer in option %s",
+					ucl_object_type_to_string (ucl_object_type (obj)),
+					ucl_object_key (obj));
 			return FALSE;
 		}
 		*target.up = val;
@@ -2924,9 +2964,11 @@ rspamd_rcl_parse_struct_integer (rspamd_mempool_t *pool,
 		target.ip = (gint *)(((gchar *)pd->user_struct) + pd->offset);
 		if (!ucl_object_toint_safe (obj, &val)) {
 			g_set_error (err,
-				CFG_RCL_ERROR,
-				EINVAL,
-				"cannot convert param to integer");
+					CFG_RCL_ERROR,
+					EINVAL,
+					"cannot convert %s to integer in option %s",
+					ucl_object_type_to_string (ucl_object_type (obj)),
+					ucl_object_key (obj));
 			return FALSE;
 		}
 		*target.ip = val;
@@ -2949,9 +2991,11 @@ rspamd_rcl_parse_struct_double (rspamd_mempool_t *pool,
 
 	if (!ucl_object_todouble_safe (obj, target)) {
 		g_set_error (err,
-			CFG_RCL_ERROR,
-			EINVAL,
-			"cannot convert param %s to double", ucl_object_key (obj));
+				CFG_RCL_ERROR,
+				EINVAL,
+				"cannot convert %s to double in option %s",
+				ucl_object_type_to_string (ucl_object_type (obj)),
+				ucl_object_key (obj));
 		return FALSE;
 	}
 
@@ -2977,9 +3021,11 @@ rspamd_rcl_parse_struct_time (rspamd_mempool_t *pool,
 
 	if (!ucl_object_todouble_safe (obj, &val)) {
 		g_set_error (err,
-			CFG_RCL_ERROR,
-			EINVAL,
-				"cannot convert param %s to double", ucl_object_key (obj));
+				CFG_RCL_ERROR,
+				EINVAL,
+				"cannot convert %s to double in option %s",
+				ucl_object_type_to_string (ucl_object_type (obj)),
+				ucl_object_key (obj));
 		return FALSE;
 	}
 
@@ -3009,9 +3055,11 @@ rspamd_rcl_parse_struct_time (rspamd_mempool_t *pool,
 	}
 	else {
 		g_set_error (err,
-			CFG_RCL_ERROR,
-			EINVAL,
-			"invalid flags to parse time value in %s", ucl_object_key (obj));
+				CFG_RCL_ERROR,
+				EINVAL,
+				"cannot convert %s to time in option %s",
+				ucl_object_type_to_string (ucl_object_type (obj)),
+				ucl_object_key (obj));
 		return FALSE;
 	}
 
@@ -3201,7 +3249,8 @@ rspamd_rcl_parse_struct_string_list (rspamd_mempool_t *pool,
 			g_set_error (err,
 					CFG_RCL_ERROR,
 					EINVAL,
-					"cannot convert an object or array to string: %s",
+					"cannot convert %s to a string list in option %s",
+					ucl_object_type_to_string (ucl_object_type (obj)),
 					ucl_object_key (obj));
 			ucl_object_iterate_free (iter);
 
@@ -3277,7 +3326,8 @@ rspamd_rcl_parse_struct_boolean (rspamd_mempool_t *pool,
 		g_set_error (err,
 				CFG_RCL_ERROR,
 				EINVAL,
-				"cannot convert an object to boolean: %s",
+				"cannot convert %s to boolean in option %s",
+				ucl_object_type_to_string (ucl_object_type (obj)),
 				ucl_object_key (obj));
 		return FALSE;
 	}
@@ -3319,7 +3369,8 @@ rspamd_rcl_parse_struct_addr (rspamd_mempool_t *pool,
 		g_set_error (err,
 				CFG_RCL_ERROR,
 				EINVAL,
-				"cannot convert an object to inet address: %s",
+				"cannot convert %s to inet address in option %s",
+				ucl_object_type_to_string (ucl_object_type (obj)),
 				ucl_object_key (obj));
 		return FALSE;
 	}
@@ -3347,7 +3398,7 @@ rspamd_rcl_parse_struct_mime_addr (rspamd_mempool_t *pool,
 		if (ucl_object_type (cur) == UCL_STRING) {
 			val = ucl_object_tostring (obj);
 			tmp_addr = rspamd_email_address_from_mime (pool, val,
-					strlen (val), tmp_addr);
+					strlen (val), tmp_addr, -1);
 		}
 		else {
 			g_set_error (err,
@@ -3738,7 +3789,7 @@ rspamd_config_calculate_cksum (struct rspamd_config *cfg)
 	ucl_object_emit_full (cfg->rcl_obj, UCL_EMIT_MSGPACK,
 			&f, cfg->config_comments);
 	rspamd_cryptobox_hash_final (&hs, cksumbuf);
-	cfg->checksum = rspamd_encode_base32 (cksumbuf, sizeof (cksumbuf));
+	cfg->checksum = rspamd_encode_base32 (cksumbuf, sizeof (cksumbuf), RSPAMD_BASE32_DEFAULT);
 	/* Also change the tag of cfg pool to be equal to the checksum */
 	rspamd_strlcpy (cfg->cfg_pool->tag.uid, cfg->checksum,
 			MIN (sizeof (cfg->cfg_pool->tag.uid), strlen (cfg->checksum)));

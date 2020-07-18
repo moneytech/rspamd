@@ -501,6 +501,25 @@ rspamd_content_type_parser (gchar *in, gsize len, rspamd_mempool_t *pool)
 						pname_end, c, c + qlen);
 			}
 
+			if (*p == '"') {
+				p ++;
+
+				if (p == end) {
+					/* Last quote: done... */
+					break;
+				}
+
+				if (*p == ';') {
+					p ++;
+					state = parse_space;
+					next_state = parse_param_name;
+					pname_start = NULL;
+					pname_end = NULL;
+					continue;
+				}
+			}
+
+			/* We should not normally be here in fact */
 			if (g_ascii_isspace (*p)) {
 				state = parse_space;
 				next_state = parse_param_name;
@@ -690,6 +709,11 @@ rspamd_content_type_parse (const gchar *in,
 
 		if (rspamd_ftok_casecmp (&res->type, &srch) == 0) {
 			res->flags |= RSPAMD_CONTENT_TYPE_MULTIPART;
+
+			RSPAMD_FTOK_ASSIGN (&srch, "encrypted");
+			if (rspamd_ftok_casecmp (&res->subtype, &srch) == 0) {
+				res->flags |= RSPAMD_CONTENT_TYPE_ENCRYPTED;
+			}
 		}
 		else {
 			RSPAMD_FTOK_ASSIGN (&srch, "text");

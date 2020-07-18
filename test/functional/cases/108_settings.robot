@@ -9,6 +9,7 @@ Variables       ${TESTDIR}/lib/vars.py
 ${CONFIG}       ${TESTDIR}/configs/plugins.conf
 ${LUA_SCRIPT}   ${TESTDIR}/lua/settings.lua
 ${MESSAGE}      ${TESTDIR}/messages/spam_message.eml
+${MESSAGE_PRIORITY}      ${TESTDIR}/messages/priority.eml
 ${MESSAGE_7BIT}      ${TESTDIR}/messages/utf.eml
 ${MESSAGE_CUSTOM_HDR}      ${TESTDIR}/messages/empty-plain-text.eml
 ${MESSAGE_ABSENT_MIME}      ${TESTDIR}/messages/ed25519.eml
@@ -16,6 +17,15 @@ ${SPAM_MESSAGE}      ${TESTDIR}/messages/spam.eml
 ${HAM_MESSAGE}      ${TESTDIR}/messages/ham.eml
 ${RSPAMD_SCOPE}  Suite
 ${URL_TLD}      ${TESTDIR}/../lua/unit/test_tld.dat
+
+*** Keywords ***
+Check Everything Disabled
+  [Arguments]  ${result}
+  Check Rspamc  ${result}  Action: no action
+  Should Not Contain  ${result.stdout}  SIMPLE_VIRTUAL
+  Should Not Contain  ${result.stdout}  SIMPLE_PRE
+  Should Not Contain  ${result.stdout}  SIMPLE_POST
+  Should Not Contain  ${result.stdout}  BAYES_SPAM
 
 *** Test Cases ***
 NO SETTINGS SPAM
@@ -33,6 +43,22 @@ NO SETTINGS HAM
   Should Contain  ${result.stdout}  SIMPLE_PRE
   Should Contain  ${result.stdout}  SIMPLE_POST
   Should Contain  ${result.stdout}  BAYES_HAM
+
+EMPTY SYMBOLS ENABLED - STATIC
+  ${result} =  Scan Message With Rspamc  ${SPAM_MESSAGE}  -i  5.5.5.5
+  Check Everything Disabled  ${result}
+
+EMPTY GROUPS ENABLED - STATIC
+  ${result} =  Scan Message With Rspamc  ${SPAM_MESSAGE}  -i  5.5.5.6
+  Check Everything Disabled  ${result}
+
+EMPTY SYMBOLS ENABLED - SETTINGS-ID
+  ${result} =  Scan Message With Rspamc  ${SPAM_MESSAGE}  --header  Settings-Id=empty_symbols_enabled
+  Check Everything Disabled  ${result}
+
+EMPTY GROUPS ENABLED - SETTINGS-ID
+  ${result} =  Scan Message With Rspamc  ${SPAM_MESSAGE}  --header  Settings-Id=empty_groups_enabled
+  Check Everything Disabled  ${result}
 
 ENABLE SYMBOL - NORMAL
   ${result} =  Scan Message With Rspamc  ${HAM_MESSAGE}  --header  Settings={symbols_enabled = ["SIMPLE_TEST"]}
@@ -220,6 +246,11 @@ SETTINGS ID - VIRTUAL DEP
   Should Not Contain  ${result.stdout}  SIMPLE_VIRTUAL
   Should Not Contain  ${result.stdout}  SIMPLE_POST
   Should Not Contain  ${result.stdout}  SIMPLE_PRE
+
+PRIORITY
+  ${result} =  Scan Message With Rspamc  ${MESSAGE_PRIORITY}  --header  Settings-Id=id_virtual_group  --from  user@test.com
+  Should Contain  ${result.stdout}  PRIORITY_2
+
 
 *** Keywords ***
 Settings Setup

@@ -36,6 +36,25 @@ greylist {
 --]]
 
 if confighelp then
+  rspamd_config:add_example(nil, 'greylist',
+      "Performs adaptive greylisting using Redis",
+      [[
+greylist {
+  expire = 1d; # Buckets expire (1 day by default)
+  timeout = 5m; # Greylisting timeout
+  key_prefix = 'rg'; # Redis prefix
+  max_data_len = 10k; # Use boy hash up to this value of bytes for greylisting
+  message = 'Try again later'; # Default greylisting message
+  symbol = 'GREYLIST'; # Append symbol
+  action = 'soft reject'; # Default action change (for Exim use `greylist`)
+  whitelist_symbols = []; # Skip greylisting if one of the following symbols has been found
+  ipv4_mask = 19; # Mask bits for ipv4
+  ipv6_mask = 64; # Mask bits for ipv6
+  report_time = false; # Tell when greylisting is expired (appended to `message`)
+  check_local = false; # Greylist local messages
+  check_authed = false; # Greylist authenticated users
+}
+  ]])
   return
 end
 
@@ -464,17 +483,31 @@ if opts then
     rspamd_logger.infox(rspamd_config, 'no servers are specified, disabling module')
     rspamd_lua_utils.disable_module(N, "redis")
   else
+    lua_redis.register_prefix(settings.key_prefix .. 'b[a-z0-9]{20}', N,
+        'Greylisting elements (body hashes)"', {
+          type = 'string',
+        })
+    lua_redis.register_prefix(settings.key_prefix .. 'm[a-z0-9]{20}', N,
+        'Greylisting elements (meta hashes)"', {
+          type = 'string',
+        })
     rspamd_config:register_symbol({
       name = 'GREYLIST_SAVE',
       type = 'postfilter',
       callback = greylist_set,
       priority = 6,
     })
-    rspamd_config:register_symbol({
+    local id = rspamd_config:register_symbol({
       name = 'GREYLIST_CHECK',
       type = 'prefilter',
       callback = greylist_check,
       priority = 6,
+    })
+    rspamd_config:register_symbol({
+      name = settings.symbol,
+      type = 'virtual',
+      parent = id,
+      score = 0,
     })
   end
 end

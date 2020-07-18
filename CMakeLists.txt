@@ -8,7 +8,7 @@
 CMAKE_MINIMUM_REQUIRED(VERSION 3.9 FATAL_ERROR)
 
 SET(RSPAMD_VERSION_MAJOR 2)
-SET(RSPAMD_VERSION_MINOR 3)
+SET(RSPAMD_VERSION_MINOR 6)
 
 # Keep two digits all the time
 SET(RSPAMD_VERSION_MAJOR_NUM ${RSPAMD_VERSION_MAJOR}0)
@@ -68,7 +68,6 @@ INCLUDE(CMakeParseArguments)
 INCLUDE(FindArch)
 INCLUDE(AsmOp)
 INCLUDE(FindRagel)
-INCLUDE(FindLua)
 INCLUDE(ProcessPackage)
 
 IF(NOT RAGEL_FOUND)
@@ -121,37 +120,65 @@ INCLUDE(OSDep)
 
 # Now find libraries and headers
 LIST(APPEND RSPAMD_REQUIRED_LIBRARIES "m")
+LIST(APPEND RSPAMD_REQUIRED_LIBRARIES "pthread")
+
 IF(ENABLE_LUAJIT MATCHES "ON")
-	#ProcessPackage(LUAJIT luajit)
-	SET(WITH_LUA 1)
-	FindLua(VERSION_MAJOR "5" VERSION_MINOR "1" ROOT "${LUA_ROOT}")
-	IF(NOT LUA_FOUND)
-		MESSAGE(FATAL_ERROR "Lua not found, lua support is required")
-	ELSE(NOT LUA_FOUND)
-		SET(WITH_LUA 1)
-		INCLUDE_DIRECTORIES("${LUA_INCLUDE_DIR}")
-	ENDIF(NOT LUA_FOUND)
+	ProcessPackage(LIBLUAJIT LIBRARY	"luajit"
+										"luajit-2.1"
+										"luajit2.1"
+										"luajit-2.0"
+										"luajit2.0"
+										"luajit-5.1"
+			INCLUDE luajit.h INCLUDE_SUFFIXES
+										"include/luajit-2.1"
+										"include/luajit-2.0"
+										"include/luajit"
+			ROOT ${LUA_ROOT}
+			MODULES luajit)
+	SET(WITH_LUAJIT 1)
 ELSE(ENABLE_LUAJIT MATCHES "ON")
-	FindLua(VERSION_MAJOR "5" VERSION_MINOR "3" ROOT "${LUA_ROOT}")
-	IF(NOT LUA_FOUND)
-		FindLua(VERSION_MAJOR "5" VERSION_MINOR "2" ROOT "${LUA_ROOT}")
-		IF(NOT LUA_FOUND)
-				FindLua(VERSION_MAJOR "5" VERSION_MINOR "1" ROOT "${LUA_ROOT}")
-		ENDIF(NOT LUA_FOUND)
-	ENDIF(NOT LUA_FOUND)
-	IF(NOT LUA_FOUND)
-			MESSAGE(FATAL_ERROR "Lua not found, lua support is required")
-	ELSE(NOT LUA_FOUND)
-			SET(WITH_LUA 1)
-			INCLUDE_DIRECTORIES("${LUA_INCLUDE_DIR}")
-	ENDIF(NOT LUA_FOUND)
+
+	ProcessPackage(LIBLUA LIBRARY	"lua"
+			"lua-5.3"
+			INCLUDE lua.h INCLUDE_SUFFIXES
+			"include/lua-5.3"
+			"include/lua5.3"
+			"include/lua53"
+			"include/lua"
+			ROOT ${LUA_ROOT}
+			MODULES lua53
+			OPTIONAL)
+
+	IF (NOT WITH_LIBLUA)
+		ProcessPackage(LIBLUA LIBRARY	"lua"
+				"lua-5.2"
+				INCLUDE lua.h INCLUDE_SUFFIXES
+				"include/lua-5.2"
+				"include/lua5.2"
+				"include/lua52"
+				"include/lua"
+				ROOT ${LUA_ROOT}
+				MODULES lua52
+				OPTIONAL)
+
+		IF (NOT WITH_LIBLUA)
+			ProcessPackage(LIBLUA LIBRARY	"lua"
+					"lua-5.1"
+					INCLUDE lua.h INCLUDE_SUFFIXES
+					"include/lua-5.1"
+					"include/lua5.1"
+					"include/lua51"
+					"include/lua"
+					ROOT ${LUA_ROOT}
+					MODULES lua51)
+		ENDIF()
+	ENDIF()
 ENDIF(ENABLE_LUAJIT MATCHES "ON")
 
 IF(ENABLE_JEMALLOC MATCHES "ON" AND NOT SANITIZE)
 	ProcessPackage(JEMALLOC LIBRARY jemalloc_pic jemalloc INCLUDE jemalloc.h INCLUDE_SUFFIXES include/jemalloc
 		ROOT ${JEMALLOC_ROOT_DIR})
 	SET(WITH_JEMALLOC "1")
-	LIST(APPEND RSPAMD_REQUIRED_LIBRARIES "-lpthread")
 ENDIF()
 
 IF(ENABLE_LIBUNWIND MATCHES "ON")
@@ -216,7 +243,6 @@ CHECK_INCLUDE_FILES(string.h    HAVE_STRING_H)
 CHECK_INCLUDE_FILES(strings.h   HAVE_STRINGS_H)
 CHECK_INCLUDE_FILES(time.h      HAVE_TIME_H)
 CHECK_INCLUDE_FILES(unistd.h    HAVE_UNISTD_H)
-CHECK_INCLUDE_FILES(sysexits.h  HAVE_SYSEXITS_H)
 CHECK_INCLUDE_FILES(stdint.h  HAVE_STDINT_H)
 CHECK_INCLUDE_FILES(inttypes.h  HAVE_INTTYPES_H)
 CHECK_INCLUDE_FILES(stdbool.h  HAVE_STDBOOL_H)
@@ -331,8 +357,19 @@ CHECK_SYMBOL_EXISTS(I_SETSIG "sys/types.h;sys/ioctl.h" HAVE_SETSIG)
 CHECK_SYMBOL_EXISTS(O_ASYNC "sys/types.h;sys/fcntl.h" HAVE_OASYNC)
 CHECK_SYMBOL_EXISTS(O_NOFOLLOW "sys/types.h;sys/fcntl.h" HAVE_ONOFOLLOW)
 CHECK_SYMBOL_EXISTS(O_CLOEXEC "sys/types.h;sys/fcntl.h" HAVE_OCLOEXEC)
+
+# OpenSSL specific stuff
 LIST(APPEND CMAKE_REQUIRED_INCLUDES "${LIBSSL_INCLUDE}")
+IF(LIBCRYPT_LIBRARY_PATH)
+	SET(CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES};-L${LIBCRYPT_LIBRARY_PATH};${LIBCRYPT_LIBRARY}")
+	SET(CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES};-L${LIBSSL_LIBRARY_PATH};${LIBSSL_LIBRARY}")
+ELSE()
+	SET(CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES};-lcrypt;-lssl")
+ENDIF()
+
 CHECK_SYMBOL_EXISTS(SSL_set_tlsext_host_name "openssl/ssl.h" HAVE_SSL_TLSEXT_HOSTNAME)
+CHECK_SYMBOL_EXISTS(FIPS_mode "openssl/crypto.h" HAVE_FIPS_MODE)
+
 CHECK_SYMBOL_EXISTS(dirfd "sys/types.h;unistd.h;dirent.h" HAVE_DIRFD)
 CHECK_SYMBOL_EXISTS(fpathconf "sys/types.h;unistd.h" HAVE_FPATHCONF)
 CHECK_SYMBOL_EXISTS(sigaltstack "signal.h" HAVE_SIGALTSTACK)
@@ -397,7 +434,6 @@ TRY_RUN(_CAN_RUN _CAN_COMPILE
 	CMAKE_FLAGS CMAKE_C_FLAGS="-pthread")
 IF(_CAN_RUN EQUAL 1)
 	SET(HAVE_PTHREAD_PROCESS_SHARED 1 CACHE INTERNAL "")
-	LIST(APPEND RSPAMD_REQUIRED_LIBRARIES "-lpthread")
 ENDIF(_CAN_RUN EQUAL 1)
 IF(HAVE_PTHREAD_PROCESS_SHARED)
 	MESSAGE(STATUS "pthread_mutexattr_setpshared is supported")
@@ -469,6 +505,11 @@ IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	# on a build system. On the other hand, we know that linux has stupid
 	# but compatible shmem support, so we assume this macro as true
 	SET(HAVE_SANE_SHMEM 1)
+	CHECK_C_SOURCE_COMPILES ("#define _GNU_SOURCE
+						  #include <sys/socket.h>
+						  int main (int argc, char **argv) {
+							return ((int*)(&recvmmsg))[argc];
+						  }" HAVE_RECVMMSG)
 ELSE()
 	CHECK_C_SOURCE_RUNS("
 	#include <sys/mman.h>
@@ -587,6 +628,8 @@ ADD_SUBDIRECTORY(contrib/t1ha)
 ADD_SUBDIRECTORY(contrib/libev)
 ADD_SUBDIRECTORY(contrib/kann)
 ADD_SUBDIRECTORY(contrib/fastutf8)
+ADD_SUBDIRECTORY(contrib/google-ced)
+
 
 IF (NOT WITH_LUAJIT)
 	ADD_SUBDIRECTORY(contrib/lua-bit)
@@ -607,6 +650,7 @@ LIST(APPEND RSPAMD_REQUIRED_LIBRARIES rspamd-actrie)
 LIST(APPEND RSPAMD_REQUIRED_LIBRARIES rspamd-t1ha)
 LIST(APPEND RSPAMD_REQUIRED_LIBRARIES rspamd-ev)
 LIST(APPEND RSPAMD_REQUIRED_LIBRARIES rspamd-kann)
+LIST(APPEND RSPAMD_REQUIRED_LIBRARIES rspamd-ced)
 
 IF(ENABLE_CLANG_PLUGIN MATCHES "ON")
 	ADD_SUBDIRECTORY(clang-plugin)
@@ -627,7 +671,6 @@ CONFIGURE_FILE(config.h.in src/config.h)
 # Configs
 INSTALL(CODE "FILE(MAKE_DIRECTORY \$ENV{DESTDIR}${CONFDIR})")
 INSTALL(CODE "FILE(MAKE_DIRECTORY \$ENV{DESTDIR}${SHAREDIR})")
-INSTALL(CODE "FILE(MAKE_DIRECTORY \$ENV{DESTDIR}${EXAMPLESDIR})")
 INSTALL(CODE "FILE(MAKE_DIRECTORY \$ENV{DESTDIR}${LUALIBDIR})")
 INSTALL(CODE "FILE(MAKE_DIRECTORY \$ENV{DESTDIR}${PLUGINSDIR})")
 INSTALL(CODE "FILE(MAKE_DIRECTORY \$ENV{DESTDIR}${RULESDIR})")

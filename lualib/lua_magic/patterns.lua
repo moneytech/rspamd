@@ -26,19 +26,16 @@ local patterns = {
     -- These are alternatives
     matches = {
       {
-        string = [[^%PDF-\d]],
-        position = 6, -- must be end of the match, as that's how hyperscan works (or use relative_position)
+        string = [[%PDF-[12]\.\d]],
+        position = {'<=', 1024},
         weight = 60,
+        heuristic = heuristics.pdf_format_heuristic
       },
       {
-        string = [[^\012%PDF-\d]],
-        position = 7,
+        string = [[%FDF-[12]\.\d]],
+        position = {'<=', 1024},
         weight = 60,
-      },
-      {
-        string = [[^%FDF-\d]],
-        position = 6,
-        weight = 60,
+        heuristic = heuristics.pdf_format_heuristic
       },
     },
   },

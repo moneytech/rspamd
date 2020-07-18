@@ -268,6 +268,15 @@ rspamd_dkim_key_t *rspamd_dkim_make_key (const gchar *keydata, guint keylen,
 										 enum rspamd_dkim_key_type type,
 										 GError **err);
 
+#define RSPAMD_DKIM_KEY_ID_LEN 16
+/**
+ * Returns key id for dkim key (raw md5 of RSPAMD_DKIM_KEY_ID_LEN)
+ * NOT ZERO TERMINATED, use RSPAMD_DKIM_KEY_ID_LEN for length
+ * @param key
+ * @return
+ */
+const guchar *rspamd_dkim_key_id (rspamd_dkim_key_t *key);
+
 /**
  * Parse DKIM public key from a TXT record
  * @param txt

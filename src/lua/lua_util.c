@@ -94,16 +94,18 @@ LUA_FUNCTION_DEF (util, decode_qp);
 LUA_FUNCTION_DEF (util, decode_base64);
 
 /***
- * @function util.encode_base32(input)
+ * @function util.encode_base32(input, [b32type = 'default'])
  * Encodes data in base32 breaking lines if needed
  * @param {text or string} input input data
+ * @param {string} b32type base32 type (default, bleach, rfc)
  * @return {rspamd_text} encoded data chunk
  */
 LUA_FUNCTION_DEF (util, encode_base32);
 /***
- * @function util.decode_base32(input)
+ * @function util.decode_base32(input, [b32type = 'default'])
  * Decodes data from base32 ignoring whitespace characters
  * @param {text or string} input data to decode
+ * @param {string} b32type base32 type (default, bleach, rfc)
  * @return {rspamd_text} decoded data chunk
  */
 LUA_FUNCTION_DEF (util, decode_base32);
@@ -149,18 +151,6 @@ LUA_FUNCTION_DEF (util, parse_html);
  * @return {number} number of differences in two strings
  */
 LUA_FUNCTION_DEF (util, levenshtein_distance);
-
-/***
- * @function util.parse_addr(str)
- * Parse rfc822 address to components. Returns a table of components:
- *
- * - `name`: name of address (e.g. Some User)
- * - `addr`: address part (e.g. user@example.com)
- *
- * @param {string} str input string
- * @return {table} resulting table of components
- */
-LUA_FUNCTION_DEF (util, parse_addr);
 
 /***
  * @function util.fold_header(name, value, [how, [stop_chars]])
@@ -211,13 +201,22 @@ LUA_FUNCTION_DEF (util, get_tld);
 LUA_FUNCTION_DEF (util, glob);
 
 /***
- * @function util.parse_mail_address(str, pool)
+ * @function util.parse_mail_address(str, [pool])
  * Parses email address and returns a table of tables in the following format:
  *
+ * - `raw` - the original value without any processing
  * - `name` - name of internet address in UTF8, e.g. for `Vsevolod Stakhov <blah@foo.com>` it returns `Vsevolod Stakhov`
  * - `addr` - address part of the address
  * - `user` - user part (if present) of the address, e.g. `blah`
  * - `domain` - domain part (if present), e.g. `foo.com`
+ * - `flags` - table with following keys set to true if given condition fulfilled:
+ *   - [valid] - valid SMTP address in conformity with https://tools.ietf.org/html/rfc5321#section-4.1.
+ *   - [ip] - domain is IPv4/IPv6 address
+ *   - [braced] - angled `<blah@foo.com>` address
+ *   - [quoted] - quoted user part
+ *   - [empty] - empty address
+ *   - [backslash] - user part contains backslash
+ *   - [8bit] - contains 8bit characters
  *
  * @param {string} str input string
  * @param {rspamd_mempool} pool memory pool to use
@@ -365,7 +364,7 @@ LUA_FUNCTION_DEF (util, close_file);
 LUA_FUNCTION_DEF (util, random_hex);
 
 /***
- * @function util.zstd_compress(data)
+ * @function util.zstd_compress(data, [level=1])
  * Compresses input using zstd compression
  *
  * @param {string/rspamd_text} data input data
@@ -383,13 +382,24 @@ LUA_FUNCTION_DEF (util, zstd_compress);
 LUA_FUNCTION_DEF (util, zstd_decompress);
 
 /***
- * @function util.gzip_decompress(data)
+ * @function util.gzip_decompress(data, [size_limit])
  * Decompresses input using gzip algorithm
  *
  * @param {string/rspamd_text} data compressed data
- * @return {error,rspamd_text} pair of error + decompressed text
+ * @param {integer} size_limit optional size limit
+ * @return {rspamd_text} decompressed text
  */
 LUA_FUNCTION_DEF (util, gzip_decompress);
+
+/***
+ * @function util.inflate(data, [size_limit])
+ * Decompresses input using inflate algorithm
+ *
+ * @param {string/rspamd_text} data compressed data
+ * @param {integer} size_limit optional size limit
+ * @return {rspamd_text} decompressed text
+ */
+LUA_FUNCTION_DEF (util, inflate);
 
 /***
  * @function util.gzip_compress(data)
@@ -637,12 +647,12 @@ static const struct luaL_reg utillib_f[] = {
 	LUA_INTERFACE_DEF (util, tanh),
 	LUA_INTERFACE_DEF (util, parse_html),
 	LUA_INTERFACE_DEF (util, levenshtein_distance),
-	LUA_INTERFACE_DEF (util, parse_addr),
 	LUA_INTERFACE_DEF (util, fold_header),
 	LUA_INTERFACE_DEF (util, is_uppercase),
 	LUA_INTERFACE_DEF (util, humanize_number),
 	LUA_INTERFACE_DEF (util, get_tld),
 	LUA_INTERFACE_DEF (util, glob),
+	{"parse_addr", lua_util_parse_mail_address},
 	LUA_INTERFACE_DEF (util, parse_mail_address),
 	LUA_INTERFACE_DEF (util, strlen_utf8),
 	LUA_INTERFACE_DEF (util, lower_utf8),
@@ -662,6 +672,7 @@ static const struct luaL_reg utillib_f[] = {
 	LUA_INTERFACE_DEF (util, zstd_decompress),
 	LUA_INTERFACE_DEF (util, gzip_compress),
 	LUA_INTERFACE_DEF (util, gzip_decompress),
+	LUA_INTERFACE_DEF (util, inflate),
 	LUA_INTERFACE_DEF (util, normalize_prob),
 	LUA_INTERFACE_DEF (util, caseless_hash),
 	LUA_INTERFACE_DEF (util, caseless_hash_fast),
@@ -872,7 +883,7 @@ lua_util_process_message (lua_State *L)
 
 	if (cfg != NULL && message != NULL) {
 		base = ev_loop_new (EVFLAG_SIGNALFD|EVBACKEND_ALL);
-		rspamd_init_filters (cfg, FALSE);
+		rspamd_init_filters (cfg, false, false);
 		task = rspamd_task_new (NULL, cfg, NULL, NULL, base, FALSE);
 		task->msg.begin = rspamd_mempool_alloc (task->task_pool, mlen);
 		rspamd_strlcpy ((gpointer)task->msg.begin, message, mlen);
@@ -1145,6 +1156,7 @@ lua_util_encode_base32 (lua_State *L)
 	struct rspamd_lua_text *t;
 	const gchar *s = NULL;
 	gchar *out;
+	enum rspamd_base32_type btype = RSPAMD_BASE32_DEFAULT;
 	gsize inlen, outlen;
 
 	if (lua_type (L, 1) == LUA_TSTRING) {
@@ -1159,11 +1171,19 @@ lua_util_encode_base32 (lua_State *L)
 		}
 	}
 
+	if (lua_type (L, 2) == LUA_TSTRING) {
+		btype = rspamd_base32_decode_type_from_str (lua_tostring (L, 2));
+
+		if (btype == RSPAMD_BASE32_INVALID) {
+			return luaL_error (L, "invalid b32 type: %s", lua_tostring (L, 2));
+		}
+	}
+
 	if (s == NULL) {
-		lua_pushnil (L);
+		return luaL_error (L, "invalid arguments");
 	}
 	else {
-		out = rspamd_encode_base32 (s, inlen);
+		out = rspamd_encode_base32 (s, inlen, btype);
 
 		if (out != NULL) {
 			t = lua_newuserdata (L, sizeof (*t));
@@ -1189,6 +1209,7 @@ lua_util_decode_base32 (lua_State *L)
 	struct rspamd_lua_text *t;
 	const gchar *s = NULL;
 	gsize inlen, outlen;
+	enum rspamd_base32_type btype = RSPAMD_BASE32_DEFAULT;
 
 	if (lua_type (L, 1) == LUA_TSTRING) {
 		s = luaL_checklstring (L, 1, &inlen);
@@ -1202,12 +1223,29 @@ lua_util_decode_base32 (lua_State *L)
 		}
 	}
 
+	if (lua_type (L, 2) == LUA_TSTRING) {
+		btype = rspamd_base32_decode_type_from_str (lua_tostring (L, 2));
+
+		if (btype == RSPAMD_BASE32_INVALID) {
+			return luaL_error (L, "invalid b32 type: %s", lua_tostring (L, 2));
+		}
+	}
+
 	if (s != NULL) {
-		t = lua_newuserdata (L, sizeof (*t));
-		rspamd_lua_setclass (L, "rspamd{text}", -1);
-		t->start = rspamd_decode_base32 (s, inlen, &outlen);
-		t->len = outlen;
-		t->flags = RSPAMD_TEXT_FLAG_OWN;
+		guchar *decoded;
+
+		decoded = rspamd_decode_base32 (s, inlen, &outlen, btype);
+
+		if (decoded) {
+			t = lua_newuserdata (L, sizeof (*t));
+			rspamd_lua_setclass (L, "rspamd{text}", -1);
+			t->start = (const gchar *)decoded;
+			t->len = outlen;
+			t->flags = RSPAMD_TEXT_FLAG_OWN;
+		}
+		else {
+			lua_pushnil (L);
+		}
 	}
 	else {
 		lua_pushnil (L);
@@ -1437,51 +1475,6 @@ lua_util_levenshtein_distance (lua_State *L)
 }
 
 static gint
-lua_util_parse_addr (lua_State *L)
-{
-	LUA_TRACE_POINT;
-	GPtrArray *addrs;
-	gsize len;
-	const gchar *str = luaL_checklstring (L, 1, &len);
-	rspamd_mempool_t *pool;
-	gboolean own_pool = FALSE;
-
-	if (str) {
-
-		if (lua_type (L, 2) == LUA_TUSERDATA) {
-			pool = rspamd_lua_check_mempool (L, 2);
-
-			if (pool == NULL) {
-				return luaL_error (L, "invalid arguments");
-			}
-		}
-		else {
-			pool = rspamd_mempool_new (rspamd_mempool_suggest_size (),
-					"lua util", 0);
-			own_pool = TRUE;
-		}
-
-		addrs = rspamd_email_address_from_mime (pool, str, len, NULL);
-
-		if (addrs == NULL) {
-			lua_pushnil (L);
-		}
-		else {
-			lua_push_emails_address_list (L, addrs, 0);
-		}
-
-		if (own_pool) {
-			rspamd_mempool_delete (pool);
-		}
-	}
-	else {
-		lua_pushnil (L);
-	}
-
-	return 1;
-}
-
-static gint
 lua_util_fold_header (lua_State *L)
 {
 	LUA_TRACE_POINT;
@@ -1666,7 +1659,7 @@ lua_util_parse_mail_address (lua_State *L)
 			own_pool = TRUE;
 		}
 
-		addrs = rspamd_email_address_from_mime (pool, str, len, NULL);
+		addrs = rspamd_email_address_from_mime (pool, str, len, NULL, -1);
 
 		if (addrs == NULL) {
 			lua_pushnil (L);
@@ -2116,6 +2109,7 @@ lua_util_zstd_compress (lua_State *L)
 	LUA_TRACE_POINT;
 	struct rspamd_lua_text *t = NULL, *res, tmp;
 	gsize sz, r;
+	gint comp_level = 1;
 
 	if (lua_type (L, 1) == LUA_TSTRING) {
 		t = &tmp;
@@ -2128,6 +2122,10 @@ lua_util_zstd_compress (lua_State *L)
 
 	if (t == NULL || t->start == NULL) {
 		return luaL_error (L, "invalid arguments");
+	}
+
+	if (lua_type (L, 2) == LUA_TNUMBER) {
+		comp_level = lua_tointeger (L, 2);
 	}
 
 	sz = ZSTD_compressBound (t->len);
@@ -2143,7 +2141,7 @@ lua_util_zstd_compress (lua_State *L)
 	res->start = g_malloc (sz);
 	res->flags = RSPAMD_TEXT_FLAG_OWN;
 	rspamd_lua_setclass (L, "rspamd{text}", -1);
-	r = ZSTD_compress ((void *)res->start, sz, t->start, t->len, 1);
+	r = ZSTD_compress ((void *)res->start, sz, t->start, t->len, comp_level);
 
 	if (ZSTD_isError (r)) {
 		msg_err ("cannot compress data: %s", ZSTD_getErrorName (r));
@@ -2289,7 +2287,8 @@ lua_util_gzip_compress (lua_State *L)
 				break;
 			}
 			else {
-				msg_err ("cannot compress data: %s", zError (rc));
+				msg_err ("cannot compress data: %s (last error: %s)",
+						zError (rc), strm.msg);
 				lua_pop (L, 1); /* Text will be freed here */
 				lua_pushnil (L);
 				deflateEnd (&strm);
@@ -2318,7 +2317,7 @@ lua_util_gzip_compress (lua_State *L)
 
 
 static gint
-lua_util_gzip_decompress (lua_State *L)
+lua_util_zlib_inflate (lua_State *L, int windowBits)
 {
 	LUA_TRACE_POINT;
 	struct rspamd_lua_text *t = NULL, *res, tmp;
@@ -2327,6 +2326,7 @@ lua_util_gzip_decompress (lua_State *L)
 	gint rc;
 	guchar *p;
 	gsize remain;
+	gssize size_limit = -1;
 
 	if (lua_type (L, 1) == LUA_TSTRING) {
 		t = &tmp;
@@ -2341,11 +2341,30 @@ lua_util_gzip_decompress (lua_State *L)
 		return luaL_error (L, "invalid arguments");
 	}
 
-	sz = t->len;
+	if (lua_type (L, 2) == LUA_TNUMBER) {
+		size_limit = lua_tointeger (L, 2);
+		if (size_limit <= 0) {
+			return luaL_error (L, "invalid arguments (size_limit)");
+		}
+
+		sz = MIN (t->len * 2, size_limit);
+	}
+	else {
+		sz = t->len * 2;
+	}
 
 	memset (&strm, 0, sizeof (strm));
 	/* windowBits +16 to decode gzip, zlib 1.2.0.4+ */
-	rc = inflateInit2 (&strm, MAX_WBITS + 16);
+
+	/* Here are dragons to distinguish between raw deflate and zlib */
+	if (windowBits == MAX_WBITS && t->len > 0) {
+		if ((int)(unsigned char)((t->start[0] << 4)) != 0x80) {
+			/* Assume raw deflate */
+			windowBits = -windowBits;
+		}
+	}
+
+	rc = inflateInit2 (&strm, windowBits);
 
 	if (rc != Z_OK) {
 		return luaL_error (L, "cannot init zlib");
@@ -2366,14 +2385,15 @@ lua_util_gzip_decompress (lua_State *L)
 		strm.avail_out = remain;
 		strm.next_out = p;
 
-		rc = inflate (&strm, Z_FINISH);
+		rc = inflate (&strm, Z_NO_FLUSH);
 
 		if (rc != Z_OK && rc != Z_BUF_ERROR) {
 			if (rc == Z_STREAM_END) {
 				break;
 			}
 			else {
-				msg_err ("cannot decompress data: %s", zError (rc));
+				msg_err ("cannot decompress data: %s (last error: %s)",
+						zError (rc), strm.msg);
 				lua_pop (L, 1); /* Text will be freed here */
 				lua_pushnil (L);
 				inflateEnd (&strm);
@@ -2385,10 +2405,21 @@ lua_util_gzip_decompress (lua_State *L)
 		res->len = strm.total_out;
 
 		if (strm.avail_out == 0 && strm.avail_in != 0) {
+
+			if (size_limit > 0 || res->len >= G_MAXUINT32 / 2) {
+				if (res->len > size_limit || res->len >= G_MAXUINT32 / 2) {
+					lua_pop (L, 1); /* Text will be freed here */
+					lua_pushnil (L);
+					inflateEnd (&strm);
+
+					return 1;
+				}
+			}
+
 			/* Need to allocate more */
 			remain = res->len;
-			res->start = g_realloc ((gpointer)res->start, strm.avail_in + sz);
-			sz = strm.avail_in + sz;
+			res->start = g_realloc ((gpointer)res->start, res->len * 2);
+			sz = res->len * 2;
 			p = (guchar *)res->start + remain;
 			remain = sz - remain;
 		}
@@ -2397,9 +2428,19 @@ lua_util_gzip_decompress (lua_State *L)
 	inflateEnd (&strm);
 	res->len = strm.total_out;
 
-	return 2;
+	return 1;
+}
+static gint
+lua_util_gzip_decompress (lua_State *L)
+{
+	return lua_util_zlib_inflate (L, MAX_WBITS + 16);
 }
 
+static gint
+lua_util_inflate (lua_State *L)
+{
+	return lua_util_zlib_inflate (L, MAX_WBITS);
+}
 
 static gint
 lua_util_normalize_prob (lua_State *L)
@@ -2719,10 +2760,13 @@ lua_util_is_utf_outside_range(lua_State *L)
 				return 1;
 			}
 
-			rspamd_lru_hash_insert(validators, creation_hash_key, validator, 0, 0);
+			rspamd_lru_hash_insert(validators, creation_hash_key, validator,
+					0, 0);
 		}
 
-		ret = uspoof_checkUTF8 (validator, string_to_check, len_of_string, NULL, &uc_err);
+		gint32 pos = 0;
+		ret = uspoof_checkUTF8 (validator, string_to_check, len_of_string, &pos,
+				&uc_err);
 	}
 	else {
 		return luaL_error (L, "invalid arguments");

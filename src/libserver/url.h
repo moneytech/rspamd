@@ -4,6 +4,7 @@
 
 #include "config.h"
 #include "mem_pool.h"
+#include "khash.h"
 #include "fstring.h"
 
 #ifdef  __cplusplus
@@ -34,6 +35,9 @@ enum rspamd_url_flags {
 	RSPAMD_URL_FLAG_ZW_SPACES = 1u << 17u,
 	RSPAMD_URL_FLAG_DISPLAY_URL = 1u << 18u,
 	RSPAMD_URL_FLAG_IMAGE = 1u << 19u,
+	RSPAMD_URL_FLAG_QUERY = 1u << 20u,
+	RSPAMD_URL_FLAG_CONTENT = 1u << 21u,
+	RSPAMD_URL_FLAG_NO_TLD = 1u << 22u,
 };
 
 struct rspamd_url_tag {
@@ -44,32 +48,44 @@ struct rspamd_url_tag {
 struct rspamd_url {
 	gchar *raw;
 	gchar *string;
-	guint protocol;
-	guint port;
 
-	gchar *user;
-	gchar *host;
-	gchar *data;
-	gchar *query;
-	gchar *fragment;
-	gchar *tld;
-	gchar *visible_part;
+	guint16 protocol;
+	guint16 port;
 
-	struct rspamd_url *phished_url;
+	guint usershift;
+	guint hostshift;
+	guint datashift;
+	guint queryshift;
+	guint fragmentshift;
+	guint tldshift;
 
-	guint protocollen;
-	guint userlen;
-	guint hostlen;
-	guint datalen;
-	guint querylen;
-	guint fragmentlen;
-	guint tldlen;
+	guint16 protocollen;
+	guint16 userlen;
+	guint16 hostlen;
+	guint16 datalen;
+	guint16 querylen;
+	guint16 fragmentlen;
+	guint16 tldlen;
+	guint16 count;
+
 	guint urllen;
 	guint rawlen;
+	guint32 flags;
 
-	enum rspamd_url_flags flags;
-	guint count;
+	gchar *visible_part;
+	struct rspamd_url *phished_url;
 };
+
+#define rspamd_url_user(u) ((u)->userlen > 0 ? (u)->string + (u)->usershift : NULL)
+#define rspamd_url_user_unsafe(u) ((u)->string + (u)->usershift)
+
+#define rspamd_url_host(u) ((u)->hostlen > 0 ? (u)->string + (u)->hostshift : NULL)
+#define rspamd_url_host_unsafe(u) ((u)->string + (u)->hostshift)
+#define rspamd_url_tld_unsafe(u) ((u)->string + (u)->tldshift)
+
+#define rspamd_url_data_unsafe(u) ((u)->string + (u)->datashift)
+#define rspamd_url_query_unsafe(u) ((u)->string + (u)->queryshift)
+#define rspamd_url_fragment_unsafe(u) ((u)->string + (u)->fragmentshift)
 
 enum uri_errno {
 	URI_ERRNO_OK = 0,           /* Parsing went well */
@@ -89,7 +105,7 @@ enum rspamd_url_protocol {
 	PROTOCOL_HTTPS = 1u << 3u,
 	PROTOCOL_MAILTO = 1u << 4u,
 	PROTOCOL_TELEPHONE = 1u << 5u,
-	PROTOCOL_UNKNOWN = 1u << 31u,
+	PROTOCOL_UNKNOWN = 1u << 15u,
 };
 
 enum rspamd_url_parse_flags {
@@ -212,21 +228,6 @@ gboolean rspamd_url_task_subject_callback (struct rspamd_url *url,
 									   gsize start_offset,
 									   gsize end_offset, gpointer ud);
 
-guint rspamd_url_hash (gconstpointer u);
-
-guint rspamd_email_hash (gconstpointer u);
-
-guint rspamd_url_host_hash (gconstpointer u);
-
-
-/* Compare two emails for building emails hash */
-gboolean rspamd_emails_cmp (gconstpointer a, gconstpointer b);
-
-/* Compare two urls for building emails hash */
-gboolean rspamd_urls_cmp (gconstpointer a, gconstpointer b);
-
-gboolean rspamd_urls_host_cmp (gconstpointer a, gconstpointer b);
-
 /**
  * Decode URL encoded string in-place and return new length of a string, src and dst are NULL terminated
  * @param dst
@@ -268,6 +269,60 @@ const gchar *rspamd_url_protocol_name (enum rspamd_url_protocol proto);
  * @return
  */
 enum rspamd_url_protocol rspamd_url_protocol_from_string (const gchar *str);
+
+/**
+ * Converts string to a url flag
+ * @param str
+ * @param flag
+ * @return
+ */
+bool rspamd_url_flag_from_string (const gchar *str, gint *flag);
+
+/**
+ * Converts url flag to a string
+ * @param flag
+ * @return
+ */
+const gchar * rspamd_url_flag_to_string (int flag);
+
+/* Defines sets of urls indexed by url as is */
+KHASH_DECLARE (rspamd_url_hash, struct rspamd_url *, char);
+KHASH_DECLARE (rspamd_url_host_hash, struct rspamd_url *, char);
+
+/* Convenience functions for url sets */
+/**
+ * Add an url to set or increase the existing url count
+ * @param set
+ * @param u
+ * @return true if a new url has been added
+ */
+bool rspamd_url_set_add_or_increase (khash_t (rspamd_url_hash) *set,
+		struct rspamd_url *u);
+
+/**
+ * Same as rspamd_url_set_add_or_increase but returns the existing url if found
+ * @param set
+ * @param u
+ * @return
+ */
+struct rspamd_url * rspamd_url_set_add_or_return (khash_t (rspamd_url_hash) *set,
+												  struct rspamd_url *u);
+/**
+ * Helper for url host set
+ * @param set
+ * @param u
+ * @return
+ */
+bool rspamd_url_host_set_add (khash_t (rspamd_url_host_hash) *set,
+									 struct rspamd_url *u);
+/**
+ * Checks if a url is in set
+ * @param set
+ * @param u
+ * @return
+ */
+bool rspamd_url_set_has (khash_t (rspamd_url_hash) *set, struct rspamd_url *u);
+bool rspamd_url_host_set_has (khash_t (rspamd_url_host_hash) *set, struct rspamd_url *u);
 
 #ifdef  __cplusplus
 }

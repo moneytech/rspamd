@@ -32,6 +32,7 @@
 #cmakedefine HAVE_FCNTL_H        1
 #cmakedefine HAVE_FDATASYNC      1
 #cmakedefine HAVE_FETCH_H        1
+#cmakedefine HAVE_FIPS_MODE      1
 #cmakedefine HAVE_FLOCK          1
 #cmakedefine HAVE_FPATHCONF      1
 #cmakedefine HAVE_GETPAGESIZE    1
@@ -49,7 +50,6 @@
 #cmakedefine HAVE_LIBUTIL_H      1
 #cmakedefine HAVE_LOCALE_H       1
 #cmakedefine HAVE_MACHINE_ENDIAN_H  1
-#cmakedefine HAVE_MATH_H         1
 #cmakedefine HAVE_MAXPATHLEN     1
 #cmakedefine HAVE_FMEMOPEN       1
 #cmakedefine HAVE_MEMSET_S       1
@@ -83,6 +83,7 @@
 #cmakedefine HAVE_PWD_H          1
 #cmakedefine HAVE_RDTSC          1
 #cmakedefine HAVE_READPASSPHRASE_H  1
+#cmakedefine HAVE_RECVMMSG       1
 #cmakedefine HAVE_RUSAGE_SELF    1
 #cmakedefine HAVE_SA_SIGINFO     1
 #cmakedefine HAVE_SANE_SHMEM     1
@@ -105,7 +106,6 @@
 #cmakedefine HAVE_STRINGS_H      1
 #cmakedefine HAVE_STRING_H       1
 #cmakedefine HAVE_STROPS_H       1
-#cmakedefine HAVE_SYSEXITS_H     1
 #cmakedefine HAVE_SYSLOG_H       1
 #cmakedefine HAVE_SYS_CDEFS_H    1
 #cmakedefine HAVE_SYS_ENDIAN_H   1
@@ -144,11 +144,9 @@
 #cmakedefine WITH_HIREDIS        1
 #cmakedefine WITH_HYPERSCAN      1
 #cmakedefine WITH_JEMALLOC       1
-#cmakedefine WITH_JUDY           1
 #cmakedefine WITH_LUA            1
 #cmakedefine WITH_LUAJIT         1
 #cmakedefine WITH_PCRE2          1
-#cmakedefine WITH_PROFILER       1
 #cmakedefine WITH_SNOWBALL       1
 #cmakedefine WITH_SQLITE         1
 #cmakedefine WITH_SYSTEM_HIREDIS 1
@@ -217,7 +215,6 @@
 #define RSPAMD_RUNDIR "${RUNDIR}"
 #define RSPAMD_LOGDIR "${LOGDIR}"
 #define RSPAMD_DBDIR "${DBDIR}"
-#define RSPAMD_EXAMPLESDIR "${EXAMPLESDIR}"
 #define RSPAMD_PLUGINSDIR "${PLUGINSDIR}"
 #define RSPAMD_LUALIBDIR "${LUALIBDIR}"
 #define RSPAMD_RULESDIR "${RULESDIR}"
@@ -248,8 +245,6 @@
 #define RSPAMD_MASTER_SITE_URL "${RSPAMD_MASTER_SITE_URL}"
 
 #define MODULES_NUM        ${RSPAMD_MODULES_NUM}
-
-#define BUILDROOT "${CMAKE_BINARY_DIR}"
 
 /* sys/types */
 #ifdef HAVE_SYS_TYPES_H
@@ -381,8 +376,12 @@ typedef off_t goffset;
 #  endif
 #elif defined(__GNUC__)
 /* GCC based */
-#  if __has_attribute(__no_sanitize_address__)
-#    define RSPAMD_NO_SANITIZE __attribute__((no_sanitize_address))
+#  if defined(__has_attribute)
+#    if __has_attribute(__no_sanitize_address__)
+#      define RSPAMD_NO_SANITIZE __attribute__((no_sanitize_address))
+#    else
+#      define RSPAMD_NO_SANITIZE
+#    endif
 #  else
 #    define RSPAMD_NO_SANITIZE
 #  endif
@@ -431,6 +430,14 @@ extern uint64_t ottery_rand_uint64(void);
   #error incompatible compiler found, need gcc > 2.7 or clang
 #endif
 
+#ifdef __GNUC__
+#define RSPAMD_CONST_FUNCTION __attribute__ ((const))
+#else
+#define RSPAMD_CONST_FUNCTION
+#endif
+
 #define HAVE_OPENSSL             1
+#define HAVE_MATH_H              1
+
 
 #endif

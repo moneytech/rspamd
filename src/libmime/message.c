@@ -46,11 +46,13 @@
 #define SET_PART_UTF(part) ((part)->flags |= RSPAMD_MIME_TEXT_PART_FLAG_UTF)
 
 static const gchar gtube_pattern_reject[] = "XJS*C4JDBQADN1.NSBN3*2IDNEN*"
-		"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+				"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
 static const gchar gtube_pattern_add_header[] = "YJS*C4JDBQADN1.NSBN3*2IDNEN*"
-		"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+				"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
 static const gchar gtube_pattern_rewrite_subject[] = "ZJS*C4JDBQADN1.NSBN3*2IDNEN*"
-		"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+				"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+static const gchar gtube_pattern_no_action[] = "AJS*C4JDBQADN1.NSBN3*2IDNEN*"
+				"GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
 struct rspamd_multipattern *gtube_matcher = NULL;
 static const guint64 words_hash_seed = 0xdeadbabe;
 
@@ -616,6 +618,16 @@ rspamd_multipattern_gtube_cb (struct rspamd_multipattern *mp,
 		gsize len,
 		void *context)
 {
+	struct rspamd_task *task = (struct rspamd_task *)context;
+
+	if (strnum > 0) {
+		if (task->cfg->enable_test_patterns) {
+			return strnum + 1;
+		}
+
+		return 0;
+	}
+
 	return strnum + 1; /* To distinguish from zero */
 }
 
@@ -639,6 +651,9 @@ rspamd_check_gtube (struct rspamd_task *task, struct rspamd_mime_text_part *part
 		rspamd_multipattern_add_pattern (gtube_matcher,
 				gtube_pattern_rewrite_subject,
 				RSPAMD_MULTIPATTERN_DEFAULT);
+		rspamd_multipattern_add_pattern (gtube_matcher,
+				gtube_pattern_no_action,
+				RSPAMD_MULTIPATTERN_DEFAULT);
 
 		g_assert (rspamd_multipattern_compile (gtube_matcher, NULL));
 	}
@@ -647,21 +662,27 @@ rspamd_check_gtube (struct rspamd_task *task, struct rspamd_mime_text_part *part
 			part->utf_content->len <= max_check_size) {
 		if ((ret = rspamd_multipattern_lookup (gtube_matcher, part->utf_content->data,
 				part->utf_content->len,
-				rspamd_multipattern_gtube_cb, NULL, NULL)) > 0) {
+				rspamd_multipattern_gtube_cb, task, NULL)) > 0) {
 
 			switch (ret) {
 			case 1:
 				act = METRIC_ACTION_REJECT;
 				break;
 			case 2:
+				g_assert (task->cfg->enable_test_patterns);
 				act = METRIC_ACTION_ADD_HEADER;
 				break;
 			case 3:
+				g_assert (task->cfg->enable_test_patterns);
 				act = METRIC_ACTION_REWRITE_SUBJECT;
+				break;
+			case 4:
+				g_assert (task->cfg->enable_test_patterns);
+				act = METRIC_ACTION_NOACTION;
 				break;
 			}
 
-			if (act != METRIC_ACTION_NOACTION) {
+			if (ret != 0) {
 				task->flags |= RSPAMD_TASK_FLAG_SKIP;
 				task->flags |= RSPAMD_TASK_FLAG_GTUBE;
 				msg_info_task (
@@ -738,7 +759,7 @@ rspamd_message_process_html_text_part (struct rspamd_task *task,
 			text_part->utf_raw_content,
 			&text_part->exceptions,
 			MESSAGE_FIELD (task, urls),
-			MESSAGE_FIELD (task, emails));
+			text_part->mime_part->urls);
 
 	if (text_part->utf_content->len == 0) {
 		text_part->flags |= RSPAMD_MIME_TEXT_PART_FLAG_EMPTY;
@@ -827,13 +848,7 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 
 			rspamd_add_passthrough_result (task, action,
 					RSPAMD_PASSTHROUGH_CRITICAL,
-					score, "Gtube pattern", "GTUBE", 0);
-
-			if (ucl_object_lookup (task->messages, "smtp_message") == NULL) {
-				ucl_object_replace_key (task->messages,
-						ucl_object_fromstring ("Gtube pattern"),
-						"smtp_message", 0, false);
-			}
+					score, "Gtube pattern", "GTUBE", 0, NULL);
 		}
 
 		rspamd_task_insert_result (task, GTUBE_SYMBOL, 0, NULL);
@@ -845,8 +860,32 @@ rspamd_message_process_text_part_maybe (struct rspamd_task *task,
 	rspamd_normalize_text_part (task, text_part);
 
 	if (!IS_PART_HTML (text_part)) {
-		rspamd_url_text_extract (task->task_pool, task, text_part,
-				RSPAMD_URL_FIND_ALL);
+		if (mime_part->parent_part) {
+			struct rspamd_mime_part *parent = mime_part->parent_part;
+
+			if (IS_PART_MULTIPART (parent) && parent->specific.mp->children->len == 2) {
+				/*
+				 * Use strict extraction mode: we will extract missing urls from
+				 * an html part if needed
+				 */
+				rspamd_url_text_extract (task->task_pool, task, text_part,
+						RSPAMD_URL_FIND_STRICT);
+			}
+			else {
+				/*
+				 * Fall back to full text extraction using TLD patterns
+				 */
+				rspamd_url_text_extract (task->task_pool, task, text_part,
+						RSPAMD_URL_FIND_ALL);
+			}
+		}
+		else {
+			/*
+			 * Fall back to full text extraction using TLD patterns
+			*/
+			rspamd_url_text_extract (task->task_pool, task, text_part,
+					RSPAMD_URL_FIND_ALL);
+		}
 	}
 	else {
 		rspamd_url_text_extract (task->task_pool, task, text_part,
@@ -886,7 +925,8 @@ rspamd_message_from_data (struct rspamd_task *task, const guchar *start,
 	part->raw_data.len = len;
 	part->parsed_data.begin = start;
 	part->parsed_data.len = len;
-	part->id = MESSAGE_FIELD (task, parts)->len;
+	part->part_number = MESSAGE_FIELD (task, parts)->len;
+	part->urls = g_ptr_array_new ();
 	part->raw_headers = rspamd_message_headers_new ();
 	part->headers_order = NULL;
 
@@ -1014,6 +1054,10 @@ rspamd_message_dtor (struct rspamd_message *msg)
 					LUA_REGISTRYINDEX,
 					p->specific.lua_specific.cbref);
 		}
+
+		if (p->urls) {
+			g_ptr_array_unref (p->urls);
+		}
 	}
 
 	PTR_ARRAY_FOREACH (msg->text_parts, i, tp) {
@@ -1033,8 +1077,7 @@ rspamd_message_dtor (struct rspamd_message *msg)
 	g_ptr_array_unref (msg->text_parts);
 	g_ptr_array_unref (msg->parts);
 
-	g_hash_table_unref (msg->urls);
-	g_hash_table_unref (msg->emails);
+	kh_destroy (rspamd_url_hash, msg->urls);
 }
 
 struct rspamd_message*
@@ -1045,10 +1088,7 @@ rspamd_message_new (struct rspamd_task *task)
 	msg = rspamd_mempool_alloc0 (task->task_pool, sizeof (*msg));
 
 	msg->raw_headers = rspamd_message_headers_new ();
-
-	msg->emails = g_hash_table_new (rspamd_email_hash, rspamd_emails_cmp);
-	msg->urls = g_hash_table_new (rspamd_url_hash, rspamd_urls_cmp);
-
+	msg->urls = kh_init (rspamd_url_hash);
 	msg->parts = g_ptr_array_sized_new (4);
 	msg->text_parts = g_ptr_array_sized_new (2);
 	msg->task = task;
@@ -1087,26 +1127,22 @@ rspamd_message_parse (struct rspamd_task *task)
 	 * Exim somehow uses mailbox format for messages being scanned:
 	 * From xxx@xxx.com Fri May 13 19:08:48 2016
 	 *
-	 * So we check if a task has non-http format then we check for such a line
-	 * at the beginning to avoid errors
+	 * So we check if a task has this line to avoid possible issues
 	 */
-	if (task->cmd != CMD_CHECK_V2 || (task->protocol_flags &
-			RSPAMD_TASK_PROTOCOL_FLAG_LOCAL_CLIENT)) {
-		if (len > sizeof ("From ") - 1) {
-			if (memcmp (p, "From ", sizeof ("From ") - 1) == 0) {
-				/* Skip to CRLF */
-				msg_info_task ("mailbox input detected, enable workaround");
-				p += sizeof ("From ") - 1;
-				len -= sizeof ("From ") - 1;
+	if (len > sizeof ("From ") - 1) {
+		if (memcmp (p, "From ", sizeof ("From ") - 1) == 0) {
+			/* Skip to CRLF */
+			msg_info_task ("mailbox input detected, enable workaround");
+			p += sizeof ("From ") - 1;
+			len -= sizeof ("From ") - 1;
 
-				while (len > 0 && *p != '\n') {
-					p ++;
-					len --;
-				}
-				while (len > 0 && g_ascii_isspace (*p)) {
-					p ++;
-					len --;
-				}
+			while (len > 0 && *p != '\n') {
+				p ++;
+				len --;
+			}
+			while (len > 0 && g_ascii_isspace (*p)) {
+				p ++;
+				len --;
 			}
 		}
 	}
@@ -1430,6 +1466,10 @@ rspamd_message_process (struct rspamd_task *task)
 			lua_settop (L, funcs_top);
 		}
 
+		/* Try to detect image before checking for text */
+		rspamd_images_process_mime_part_maybe (task, part);
+
+		/* Still no content detected, try text heuristic */
 		if (part->part_type == RSPAMD_MIME_PART_UNDEFINED) {
 			rspamd_message_process_text_part_maybe (task, part);
 		}
@@ -1567,7 +1607,6 @@ rspamd_message_process (struct rspamd_task *task)
 		}
 	}
 
-	rspamd_images_process (task);
 	rspamd_images_link (task);
 
 	rspamd_tokenize_meta_words (task);

@@ -12,6 +12,7 @@ ${FLAG1_SYMBOL}  R_TEST_FUZZY_DENIED
 ${FLAG2_NUMBER}  51
 ${FLAG2_SYMBOL}  R_TEST_FUZZY_WHITE
 @{MESSAGES}      ${TESTDIR}/messages/spam_message.eml  ${TESTDIR}/messages/zip.eml
+@{MESSAGES_SKIP}  ${TESTDIR}/messages/priority.eml
 @{RANDOM_MESSAGES}  ${TESTDIR}/messages/bad_message.eml  ${TESTDIR}/messages/zip-doublebad.eml
 ${REDIS_SCOPE}  Suite
 ${RSPAMD_SCOPE}  Suite
@@ -19,6 +20,21 @@ ${SETTINGS_FUZZY_WORKER}  ${EMPTY}
 ${SETTINGS_FUZZY_CHECK}  ${EMPTY}
 
 *** Keywords ***
+Fuzzy Skip Add Test Base
+  [Arguments]  ${message}
+  Set Suite Variable  ${RSPAMD_FUZZY_ADD_${message}}  0
+  ${result} =  Run Rspamc  -h  ${LOCAL_ADDR}:${PORT_CONTROLLER}  -w  10  -f
+  ...  ${FLAG1_NUMBER}  fuzzy_add  ${message}
+  Check Rspamc  ${result}
+  Sync Fuzzy Storage
+  ${result} =  Scan Message With Rspamc  ${message}
+  Create File  ${TMPDIR}/test.map
+  Should Contain  ${result.stdout}  R_TEST_FUZZY_DENIED
+  Append To File  ${TMPDIR}/skip_hash.map.tmp  670cfcba72a87bab689958a8af5c22593dc17c907836c7c26a74d1bb49add25adfa45a5f172e3af82c9c638e8eb5fc860c22c7e966e61a459165ef0b9e1acc89
+  Hard Link  ${TMPDIR}/skip_hash.map.tmp  ${TMPDIR}/skip_hash.map
+  ${result} =  Scan Message With Rspamc  ${message}
+  Check Rspamc  ${result}  R_TEST_FUZZY_DENIED  inverse=1
+
 Fuzzy Add Test
   [Arguments]  ${message}
   Set Suite Variable  ${RSPAMD_FUZZY_ADD_${message}}  0
@@ -38,7 +54,6 @@ Fuzzy Delete Test
   Check Rspamc  ${result}
   Sync Fuzzy Storage
   ${result} =  Scan Message With Rspamc  ${message}
-  Follow Rspamd Log
   Should Not Contain  ${result.stdout}  ${FLAG1_SYMBOL}
   Should Be Equal As Integers  ${result.rc}  0
 
@@ -46,7 +61,7 @@ Fuzzy Fuzzy Test
   [Arguments]  ${message}
   Run Keyword If  ${RSPAMD_FUZZY_ADD_${message}} != 1  Fail  "Fuzzy Add was not run"
   @{path_info} =  Path Splitter  ${message}
-  @{fuzzy_files} =  List Files In Directory  @{pathinfo}[0]  pattern=@{pathinfo}[1].fuzzy*  absolute=1
+  @{fuzzy_files} =  List Files In Directory  ${pathinfo}[0]  pattern=${pathinfo}[1].fuzzy*  absolute=1
   FOR  ${i}  IN  @{fuzzy_files}
     ${result} =  Scan Message With Rspamc  ${i}
     Check Rspamc  ${result}  ${FLAG1_SYMBOL}
@@ -67,7 +82,6 @@ Fuzzy Overwrite Test
   END
   Sync Fuzzy Storage
   ${result} =  Scan Message With Rspamc  ${message}
-  Follow Rspamd Log
   Should Not Contain  ${result.stdout}  ${FLAG1_SYMBOL}
   Should Contain  ${result.stdout}  ${FLAG2_SYMBOL}
   Should Be Equal As Integers  ${result.rc}  0
@@ -129,6 +143,11 @@ Fuzzy Setup Keyed Xxhash
 
 Fuzzy Setup Encrypted Siphash
   Fuzzy Setup Encrypted  siphash
+
+Fuzzy Skip Hash Test Message
+  FOR  ${i}  IN  @{MESSAGES_SKIP}
+    Fuzzy Skip Add Test Base  ${i}
+  END
 
 Fuzzy Multimessage Add Test
   FOR  ${i}  IN  @{MESSAGES}

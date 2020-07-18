@@ -118,14 +118,43 @@ context("Selectors test", function()
     },
 
     ["to"] = {
-                selector = "to",
-                expect = {"nobody@example.com"}},
+      selector = "to",
+      expect = {"nobody@example.com"}},
 
     ["attachments"] = {
-                selector = "attachments",
-                expect = {{"ce112d07c52ae649f9646f3d0b5aaab5d4834836d771c032d1a75059d31fed84f38e00c0b205918f6d354934c2055d33d19d045f783a62561f467728ebcf0160",
-                          "ce112d07c52ae649f9646f3d0b5aaab5d4834836d771c032d1a75059d31fed84f38e00c0b205918f6d354934c2055d33d19d045f783a62561f467728ebcf0160"
-                          }}},
+      selector = "attachments",
+      expect = {{"ce112d07c52ae649f9646f3d0b5aaab5d4834836d771c032d1a75059d31fed84f38e00c0b205918f6d354934c2055d33d19d045f783a62561f467728ebcf0160",
+                 "ce112d07c52ae649f9646f3d0b5aaab5d4834836d771c032d1a75059d31fed84f38e00c0b205918f6d354934c2055d33d19d045f783a62561f467728ebcf0160"
+                }}
+    },
+
+    ["attachments blake2 base32"] = {
+      selector = "attachments('base32', 'blake2')",
+      expect = {{"qqr41dwakt3uwhucxmxsypjiifi8er3gzqhyc3r48fw1ij9dp8b8x8nyyscmoe6tpmp1r4eafezguezurazo87ecs48cw5bfm9udyob",
+                 "qqr41dwakt3uwhucxmxsypjiifi8er3gzqhyc3r48fw1ij9dp8b8x8nyyscmoe6tpmp1r4eafezguezurazo87ecs48cw5bfm9udyob"
+                }}
+    },
+
+    ["attachments blake2 base64"] = {
+      selector = "attachments('base64', 'blake2')",
+      expect = {{"zhEtB8Uq5kn5ZG89C1qqtdSDSDbXccAy0adQWdMf7YTzjgDAsgWRj201STTCBV0z0Z0EX3g6YlYfRnco688BYA==",
+                 "zhEtB8Uq5kn5ZG89C1qqtdSDSDbXccAy0adQWdMf7YTzjgDAsgWRj201STTCBV0z0Z0EX3g6YlYfRnco688BYA=="
+                }}
+    },
+
+    ["attachments blake2 rfc base32"] = {
+      selector = "attachments('rbase32', 'blake2')",
+      expect = {{"ZYIS2B6FFLTET6LEN46QWWVKWXKIGSBW25Y4AMWRU5IFTUY75WCPHDQAYCZALEMPNU2USNGCAVOTHUM5ARPXQOTCKYPUM5ZI5PHQCYA",
+                 "ZYIS2B6FFLTET6LEN46QWWVKWXKIGSBW25Y4AMWRU5IFTUY75WCPHDQAYCZALEMPNU2USNGCAVOTHUM5ARPXQOTCKYPUM5ZI5PHQCYA"
+                }}
+    },
+
+    ["attachments md5 rfc base32"] = {
+      selector = "attachments('rbase32', 'md5')",
+      expect = {{"LYXF2IMILRFFO4LLTDTM66MKEA",
+                 "LYXF2IMILRFFO4LLTDTM66MKEA"
+                }}
+    },
 
     ["attachments id"] = {
                 selector = "attachments.id",
@@ -305,13 +334,33 @@ context("Selectors test", function()
       selector = "words('full'):2",
       expect = {{'hello', 'world', '', 'mail', 'me'}}
     },
+    ["header X-Test first"] = {
+      selector = "header(X-Test, full).first",
+      expect = {"1"}
+    },
+    ["header X-Test last"] = {
+      selector = "header(X-Test, full).last",
+      expect = {"3"}
+    },
+    ["header lower digest substring"] = {
+      selector = "header('Subject').lower.digest('hex').substring(1, 16)",
+      expect = {"736ad5f50fc95d73"}
+    },
+    ["header gsub"] = {
+      selector = "header('Subject'):gsub('a', 'b')",
+      expect = {"Second, lower-cbsed hebder subject"}
+    },
+    ["header regexp first"] = {
+      selector = "header('Subject').regexp('.*').first",
+      expect = {"Second, lower-cased header subject"}
+    },
   }
 
   for case_name, case in pairs(cases) do
     test("case " .. case_name, function()
       local elts = check_selector(case.selector)
       assert_not_nil(elts)
-      assert_rspamd_table_eq({actual = elts, expect = case.expect})
+      assert_rspamd_table_eq_sorted({actual = elts, expect = case.expect})
     end)
   end
 end)
@@ -332,6 +381,9 @@ To: <nobody@example.com>, <no-one@example.com>
 Date: Wed, 19 Sep 2018 14:36:51 +0100 (BST)
 subject: Second, lower-cased header subject
 Subject: Test subject
+X-Test: 1
+X-Test: 2
+X-Test: 3
 Content-Type: multipart/alternative;
     boundary="_000_6be055295eab48a5af7ad4022f33e2d0_"
 

@@ -116,7 +116,9 @@ urls:mutex(
     urls:flag "-t --tld"
         :description "Get TLDs only",
     urls:flag "-H --host"
-        :description "Get hosts only"
+        :description "Get hosts only",
+    urls:flag "-f --full"
+      :description "Show piecewise urls as processed by Rspamd"
 )
 
 urls:flag "-u --unique"
@@ -513,6 +515,8 @@ local function urls_handler(opts)
         s = u:get_tld()
       elseif opts.host then
         s = u:get_host()
+      elseif opts.full then
+        s = rspamd_logger.slog('%s: %s', u:get_text(), u:to_table())
       else
         s = u:get_text()
       end
@@ -690,7 +694,7 @@ local function modify_handler(opts)
           return
         elseif name:lower() == 'content-transfer-encoding' then
           out[#out + 1] = string.format('%s: %s',
-              'Content-Transfer-Encoding', 'quoted-printable')
+              'Content-Transfer-Encoding', rewrite.new_cte or 'quoted-printable')
           seen_cte = true
           return
         end
@@ -712,7 +716,7 @@ local function modify_handler(opts)
 
     if not seen_cte and rewrite.need_rewrite_ct then
       out[#out + 1] = string.format('%s: %s',
-          'Content-Transfer-Encoding', 'quoted-printable')
+          'Content-Transfer-Encoding', rewrite.new_cte or 'quoted-printable')
     end
 
     -- End of headers

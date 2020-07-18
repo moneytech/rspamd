@@ -17,8 +17,8 @@
 #include "rspamd.h"
 #include "rspamd_control.h"
 #include "worker_util.h"
-#include "libutil/http_connection.h"
-#include "libutil/http_private.h"
+#include "libserver/http/http_connection.h"
+#include "libserver/http/http_private.h"
 #include "libutil/libev_helper.h"
 #include "unix-std.h"
 #include "utlist.h"
@@ -40,6 +40,7 @@ struct rspamd_control_reply_elt {
 	pid_t wrk_pid;
 	gpointer ud;
 	gint attached_fd;
+	GHashTable *pending_elts;
 	struct rspamd_control_reply_elt *prev, *next;
 };
 
@@ -105,6 +106,17 @@ static const struct rspamd_control_cmd_match {
 
 static void rspamd_control_ignore_io_handler (int fd, short what, void *ud);
 
+static void
+rspamd_control_stop_pending (struct rspamd_control_reply_elt *elt)
+{
+	GHashTable *htb;
+	/* It stops event and frees hash */
+	htb = elt->pending_elts;
+	g_hash_table_remove (elt->pending_elts, elt);
+	/* Release hash reference */
+	g_hash_table_unref (htb);
+}
+
 void
 rspamd_control_send_error (struct rspamd_control_session *session,
 		gint code, const gchar *error_msg, ...)
@@ -168,9 +180,7 @@ rspamd_control_connection_close (struct rspamd_control_session *session)
 			rspamd_inet_address_to_string (session->addr));
 
 	DL_FOREACH_SAFE (session->replies, elt, telt) {
-		rspamd_ev_watcher_stop (session->event_loop,
-				&elt->ev);
-		g_free (elt);
+		rspamd_control_stop_pending (elt);
 	}
 
 	rspamd_inet_address_free (session->addr);
@@ -385,6 +395,15 @@ rspamd_control_error_handler (struct rspamd_http_connection *conn, GError *err)
 	}
 }
 
+void
+rspamd_pending_control_free (gpointer p)
+{
+	struct rspamd_control_reply_elt *rep_elt = (struct rspamd_control_reply_elt *)p;
+
+	rspamd_ev_watcher_stop (rep_elt->event_loop, &rep_elt->ev);
+	g_free (rep_elt);
+}
+
 static struct rspamd_control_reply_elt *
 rspamd_control_broadcast_cmd (struct rspamd_main *rspamd_main,
 							  struct rspamd_control_command *cmd,
@@ -408,11 +427,17 @@ rspamd_control_broadcast_cmd (struct rspamd_main *rspamd_main,
 	while (g_hash_table_iter_next (&it, &k, &v)) {
 		wrk = v;
 
+		/* No control pipe */
 		if (wrk->control_pipe[0] == -1) {
 			continue;
 		}
 
 		if (except_pid != 0 && wrk->pid == except_pid) {
+			continue;
+		}
+
+		/* Worker is terminating, do not bother sending stuff */
+		if (wrk->state == rspamd_worker_state_terminating) {
 			continue;
 		}
 
@@ -443,12 +468,14 @@ rspamd_control_broadcast_cmd (struct rspamd_main *rspamd_main,
 			rep_elt->wrk_type = wrk->type;
 			rep_elt->event_loop = rspamd_main->event_loop;
 			rep_elt->ud = ud;
+			rep_elt->pending_elts = g_hash_table_ref (wrk->control_events_pending);
 			rspamd_ev_watcher_init (&rep_elt->ev,
 					wrk->control_pipe[0],
 					EV_READ, handler,
 					rep_elt);
 			rspamd_ev_watcher_start (rspamd_main->event_loop,
 					&rep_elt->ev, worker_io_timeout);
+			g_hash_table_insert (wrk->control_events_pending, rep_elt, rep_elt);
 
 			DL_APPEND (res, rep_elt);
 		}
@@ -750,12 +777,12 @@ rspamd_control_ignore_io_handler (int fd, short what, void *ud)
 {
 	struct rspamd_control_reply_elt *elt =
 			(struct rspamd_control_reply_elt *)ud;
+
 	struct rspamd_control_reply rep;
 
 	/* At this point we just ignore replies from the workers */
-	(void)read (fd, &rep, sizeof (rep));
-	rspamd_ev_watcher_stop (elt->event_loop, &elt->ev);
-	g_free (elt);
+	(void) !read (fd, &rep, sizeof (rep));
+	rspamd_control_stop_pending (elt);
 }
 
 static void
@@ -766,9 +793,8 @@ rspamd_control_log_pipe_io_handler (int fd, short what, void *ud)
 	struct rspamd_control_reply rep;
 
 	/* At this point we just ignore replies from the workers */
-	(void) read (fd, &rep, sizeof (rep));
-	rspamd_ev_watcher_stop (elt->event_loop, &elt->ev);
-	g_free (elt);
+	(void) !read (fd, &rep, sizeof (rep));
+	rspamd_control_stop_pending (elt);
 }
 
 static void
@@ -802,6 +828,7 @@ rspamd_control_handle_on_fork (struct rspamd_srv_command *cmd,
 		REF_RELEASE (child->cf);
 		g_hash_table_remove (srv->workers,
 				GSIZE_TO_POINTER (cmd->cmd.on_fork.cpid));
+		g_hash_table_unref (child->control_events_pending);
 		g_free (child);
 	}
 	else {
@@ -816,6 +843,8 @@ rspamd_control_handle_on_fork (struct rspamd_srv_command *cmd,
 		child->cf = parent->cf;
 		child->ppid = parent->pid;
 		REF_RETAIN (child->cf);
+		child->control_events_pending = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+				NULL, rspamd_pending_control_free);
 		g_hash_table_insert (srv->workers,
 				GSIZE_TO_POINTER (cmd->cmd.on_fork.cpid), child);
 	}
@@ -885,7 +914,7 @@ rspamd_srv_handler (EV_P_ ev_io *w, int revents)
 				if (spair == NULL) {
 					spair = g_malloc (sizeof (gint) * 2);
 
-					if (rspamd_socketpair (spair, 0) == -1) {
+					if (rspamd_socketpair (spair, cmd.cmd.spair.af) == -1) {
 						rdata->rep.reply.spair.code = errno;
 						msg_err ("cannot create socket pair: %s", strerror (errno));
 					}
@@ -904,6 +933,15 @@ rspamd_srv_handler (EV_P_ ev_io *w, int revents)
 				}
 				break;
 			case RSPAMD_SRV_HYPERSCAN_LOADED:
+				/* Load RE cache to provide it for new forks */
+				if (rspamd_re_cache_is_hs_loaded (srv->cfg->re_cache) != RSPAMD_HYPERSCAN_LOADED_FULL ||
+						cmd.cmd.hs_loaded.forced) {
+					rspamd_re_cache_load_hyperscan (
+							srv->cfg->re_cache,
+							cmd.cmd.hs_loaded.cache_dir,
+							false);
+				}
+
 				/* Broadcast command to all workers */
 				memset (&wcmd, 0, sizeof (wcmd));
 				wcmd.type = RSPAMD_CONTROL_HYPERSCAN_LOADED;

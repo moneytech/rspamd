@@ -91,12 +91,13 @@ local settings = {
     method = 'detach',
     period_months = 3,
     run_every = '7d',
-  }
+  },
+  extra_columns = {},
 }
 
 --- @language SQL
 local clickhouse_schema = {[[
-CREATE TABLE rspamd
+CREATE TABLE IF NOT EXISTS rspamd
 (
     Date Date COMMENT 'Date (used for partitioning)',
     TS DateTime COMMENT 'Date and time of the request start (UTC)',
@@ -154,8 +155,8 @@ CREATE TABLE rspamd
 PARTITION BY toMonday(Date)
 ORDER BY TS
 ]],
-[[CREATE TABLE rspamd_version ( Version UInt32) ENGINE = TinyLog]],
-[[INSERT INTO rspamd_version (Version) Values (${SCHEMA_VERSION})]],
+[[CREATE TABLE IF NOT EXISTS rspamd_version ( Version UInt32) ENGINE = TinyLog]],
+{[[INSERT INTO rspamd_version (Version) Values (${SCHEMA_VERSION})]], true},
 }
 
 -- This describes SQL queries to migrate between versions
@@ -163,19 +164,19 @@ local migrations = {
   [1] = {
     -- Move to a wide fat table
     [[ALTER TABLE rspamd
-      ADD COLUMN `Attachments.FileName` Array(String) AFTER ListId,
-      ADD COLUMN `Attachments.ContentType` Array(String) AFTER `Attachments.FileName`,
-      ADD COLUMN `Attachments.Length` Array(UInt32) AFTER `Attachments.ContentType`,
-      ADD COLUMN `Attachments.Digest` Array(FixedString(16)) AFTER `Attachments.Length`,
-      ADD COLUMN `Urls.Tld` Array(String) AFTER `Attachments.Digest`,
-      ADD COLUMN `Urls.Url` Array(String) AFTER `Urls.Tld`,
-      ADD COLUMN Emails Array(String) AFTER `Urls.Url`,
-      ADD COLUMN ASN UInt32 AFTER Emails,
-      ADD COLUMN Country FixedString(2) AFTER ASN,
-      ADD COLUMN IPNet String AFTER Country,
-      ADD COLUMN `Symbols.Names` Array(String) AFTER IPNet,
-      ADD COLUMN `Symbols.Scores` Array(Float64) AFTER `Symbols.Names`,
-      ADD COLUMN `Symbols.Options` Array(String) AFTER `Symbols.Scores`]],
+      ADD COLUMN IF NOT EXISTS `Attachments.FileName` Array(String) AFTER ListId,
+      ADD COLUMN IF NOT EXISTS `Attachments.ContentType` Array(String) AFTER `Attachments.FileName`,
+      ADD COLUMN IF NOT EXISTS `Attachments.Length` Array(UInt32) AFTER `Attachments.ContentType`,
+      ADD COLUMN IF NOT EXISTS `Attachments.Digest` Array(FixedString(16)) AFTER `Attachments.Length`,
+      ADD COLUMN IF NOT EXISTS `Urls.Tld` Array(String) AFTER `Attachments.Digest`,
+      ADD COLUMN IF NOT EXISTS `Urls.Url` Array(String) AFTER `Urls.Tld`,
+      ADD COLUMN IF NOT EXISTS Emails Array(String) AFTER `Urls.Url`,
+      ADD COLUMN IF NOT EXISTS ASN UInt32 AFTER Emails,
+      ADD COLUMN IF NOT EXISTS Country FixedString(2) AFTER ASN,
+      ADD COLUMN IF NOT EXISTS IPNet String AFTER Country,
+      ADD COLUMN IF NOT EXISTS `Symbols.Names` Array(String) AFTER IPNet,
+      ADD COLUMN IF NOT EXISTS `Symbols.Scores` Array(Float64) AFTER `Symbols.Names`,
+      ADD COLUMN IF NOT EXISTS `Symbols.Options` Array(String) AFTER `Symbols.Scores`]],
     -- Add explicit version
     [[CREATE TABLE rspamd_version ( Version UInt32) ENGINE = TinyLog]],
     [[INSERT INTO rspamd_version (Version) Values (2)]],
@@ -183,25 +184,25 @@ local migrations = {
   [2] = {
     -- Add `Subject` column
     [[ALTER TABLE rspamd
-      ADD COLUMN Subject String AFTER ListId]],
+      ADD COLUMN IF NOT EXISTS Subject String AFTER ListId]],
     -- New version
     [[INSERT INTO rspamd_version (Version) Values (3)]],
   },
   [3] = {
     [[ALTER TABLE rspamd
-      ADD COLUMN IsSpf Enum8('reject' = 0, 'allow' = 1, 'neutral' = 2, 'dnsfail' = 3, 'na' = 4, 'unknown' = 5) DEFAULT 'unknown' AFTER IsDmarc,
+      ADD COLUMN IF NOT EXISTS IsSpf Enum8('reject' = 0, 'allow' = 1, 'neutral' = 2, 'dnsfail' = 3, 'na' = 4, 'unknown' = 5) DEFAULT 'unknown' AFTER IsDmarc,
       MODIFY COLUMN IsDkim Enum8('reject' = 0, 'allow' = 1, 'unknown' = 2, 'dnsfail' = 3, 'na' = 4) DEFAULT 'unknown',
       MODIFY COLUMN IsDmarc Enum8('reject' = 0, 'allow' = 1, 'unknown' = 2, 'softfail' = 3, 'na' = 4, 'quarantine' = 5) DEFAULT 'unknown',
-      ADD COLUMN MimeRecipients Array(String) AFTER RcptDomain,
-      ADD COLUMN MessageId String AFTER MimeRecipients,
-      ADD COLUMN ScanTimeReal UInt32 AFTER `Symbols.Options`,
-      ADD COLUMN ScanTimeVirtual UInt32 AFTER ScanTimeReal]],
+      ADD COLUMN IF NOT EXISTS MimeRecipients Array(String) AFTER RcptDomain,
+      ADD COLUMN IF NOT EXISTS MessageId String AFTER MimeRecipients,
+      ADD COLUMN IF NOT EXISTS ScanTimeReal UInt32 AFTER `Symbols.Options`,
+      ADD COLUMN IF NOT EXISTS ScanTimeVirtual UInt32 AFTER ScanTimeReal]],
     -- Add aliases
     [[ALTER TABLE rspamd
-      ADD COLUMN SMTPFrom ALIAS if(From = '', '', concat(FromUser, '@', From)),
-      ADD COLUMN SMTPRcpt ALIAS if(RcptDomain = '', '', concat(RcptUser, '@', RcptDomain)),
-      ADD COLUMN MIMEFrom ALIAS if(MimeFrom = '', '', concat(MimeUser, '@', MimeFrom)),
-      ADD COLUMN MIMERcpt ALIAS MimeRecipients[1]
+      ADD COLUMN IF NOT EXISTS SMTPFrom ALIAS if(From = '', '', concat(FromUser, '@', From)),
+      ADD COLUMN IF NOT EXISTS SMTPRcpt ALIAS if(RcptDomain = '', '', concat(RcptUser, '@', RcptDomain)),
+      ADD COLUMN IF NOT EXISTS MIMEFrom ALIAS if(MimeFrom = '', '', concat(MimeUser, '@', MimeFrom)),
+      ADD COLUMN IF NOT EXISTS MIMERcpt ALIAS MimeRecipients[1]
     ]],
     -- New version
     [[INSERT INTO rspamd_version (Version) Values (4)]],
@@ -209,15 +210,15 @@ local migrations = {
   [4] = {
     [[ALTER TABLE rspamd
       MODIFY COLUMN Action Enum8('reject' = 0, 'rewrite subject' = 1, 'add header' = 2, 'greylist' = 3, 'no action' = 4, 'soft reject' = 5, 'custom' = 6) DEFAULT 'no action',
-      ADD COLUMN CustomAction String AFTER Action
+      ADD IF NOT EXISTS COLUMN CustomAction String AFTER Action
     ]],
     -- New version
     [[INSERT INTO rspamd_version (Version) Values (5)]],
   },
   [5] = {
     [[ALTER TABLE rspamd
-      ADD COLUMN AuthUser String AFTER ScanTimeVirtual,
-      ADD COLUMN SettingsId LowCardinality(String) AFTER AuthUser
+      ADD COLUMN IF NOT EXISTS AuthUser String AFTER ScanTimeVirtual,
+      ADD COLUMN IF NOT EXISTS SettingsId LowCardinality(String) AFTER AuthUser
     ]],
     -- New version
     [[INSERT INTO rspamd_version (Version) Values (6)]],
@@ -225,8 +226,8 @@ local migrations = {
   [6] = {
     -- Add new columns
     [[ALTER TABLE rspamd
-      ADD COLUMN Helo String AFTER IP,
-      ADD COLUMN SMTPRecipients Array(String) AFTER RcptDomain
+      ADD COLUMN IF NOT EXISTS Helo String AFTER IP,
+      ADD COLUMN IF NOT EXISTS SMTPRecipients Array(String) AFTER RcptDomain
     ]],
     -- Modify SMTPRcpt alias
     [[
@@ -239,8 +240,8 @@ local migrations = {
   [7] = {
     -- Add new columns
     [[ALTER TABLE rspamd
-      ADD COLUMN `Groups.Names` Array(LowCardinality(String)) AFTER `Symbols.Options`,
-      ADD COLUMN `Groups.Scores` Array(Float32) AFTER `Groups.Names`
+      ADD COLUMN IF NOT EXISTS `Groups.Names` Array(LowCardinality(String)) AFTER `Symbols.Options`,
+      ADD COLUMN IF NOT EXISTS `Groups.Scores` Array(Float32) AFTER `Groups.Names`
     ]],
     -- New version
     [[INSERT INTO rspamd_version (Version) Values (8)]],
@@ -350,6 +351,10 @@ local function clickhouse_asn_row(res)
   for _,v in ipairs(fields) do table.insert(res, v) end
 end
 
+local function clickhouse_extra_columns(res)
+  for _,v in ipairs(settings.extra_columns) do table.insert(res, v.name) end
+end
+
 local function today(ts)
   return os.date('!%Y-%m-%d', ts)
 end
@@ -428,6 +433,10 @@ local function clickhouse_send_data(task, ev_base, why, gen_rows, cust_rows)
   if settings.enable_symbols then
     clickhouse_symbols_row(fields)
     clickhouse_groups_row(fields)
+  end
+
+  if #settings.extra_columns > 0 then
+    clickhouse_extra_columns(fields)
   end
 
   send_data('generic data', gen_rows,
@@ -624,9 +633,9 @@ local function clickhouse_collect(task)
   end
 
   local nurls = 0
-  if task:has_urls(true) then
-    nurls = #task:get_urls(true)
-  end
+  local task_urls = task:get_urls(false) or {}
+
+  nurls = #task_urls
 
   local timestamp = math.floor(task:get_date({
     format = 'connect',
@@ -748,26 +757,21 @@ local function clickhouse_collect(task)
 
   -- Urls step
   local urls_urls = {}
-  if task:has_urls(false) then
 
-    for _,u in ipairs(task:get_urls(false)) do
-      if settings['full_urls'] then
-        urls_urls[u:get_text()] = u
-      else
-        urls_urls[u:get_host()] = u
-      end
+  for _,u in ipairs(task_urls) do
+    if settings['full_urls'] then
+      urls_urls[u:get_text()] = u
+    else
+      urls_urls[u:get_host()] = u
     end
-
-    -- Get tlds
-    table.insert(row, flatten_urls(function(_, u)
-      return u:get_tld() or u:get_host()
-    end, urls_urls))
-    -- Get hosts/full urls
-    table.insert(row, flatten_urls(function(k, _) return k end, urls_urls))
-  else
-    table.insert(row, {})
-    table.insert(row, {})
   end
+
+  -- Get tlds
+  table.insert(row, flatten_urls(function(_, u)
+    return u:get_tld() or u:get_host()
+  end, urls_urls))
+  -- Get hosts/full urls
+  table.insert(row, flatten_urls(function(k, _) return k end, urls_urls))
 
   -- Emails step
   if task:has_urls(true) then
@@ -829,6 +833,19 @@ local function clickhouse_collect(task)
     end
     table.insert(row, groups_tab)
     table.insert(row, gr_scores_tab)
+  end
+
+  -- Extra columns
+  if #settings.extra_columns > 0 then
+    for _,col in ipairs(settings.extra_columns) do
+      local elts = col.real_selector(task)
+
+      if elts then
+        table.insert(row, elts)
+      else
+        table.insert(row, col.default_value)
+      end
+    end
   end
 
   -- Custom data
@@ -1024,7 +1041,7 @@ local function clickhouse_remove_old_partitions(cfg, ev_base)
   return settings.retention.period
 end
 
-local function upload_clickhouse_schema(upstream, ev_base, cfg)
+local function upload_clickhouse_schema(upstream, ev_base, cfg, initial)
   local ch_params = {
     ev_base = ev_base,
     config = cfg,
@@ -1032,8 +1049,8 @@ local function upload_clickhouse_schema(upstream, ev_base, cfg)
 
   local errored = false
 
-  -- Apply schema sequentially
-  fun.each(function(v)
+  -- Upload a single element of the schema
+  local function upload_schema_elt(v)
     if errored then
       rspamd_logger.errx(rspamd_config, "cannot upload schema '%s' on clickhouse server %s: due to previous errors",
           v, upstream:get_addr():to_string(true))
@@ -1044,17 +1061,40 @@ local function upload_clickhouse_schema(upstream, ev_base, cfg)
 
     if err then
       rspamd_logger.errx(rspamd_config, "cannot upload schema '%s' on clickhouse server %s: %s",
-        sql, upstream:get_addr():to_string(true), err)
+          sql, upstream:get_addr():to_string(true), err)
       errored = true
       return
     end
     rspamd_logger.debugm(N, rspamd_config, 'uploaded clickhouse schema element %s to %s: %s',
         v, upstream:get_addr():to_string(true), reply)
-  end,
-      -- Also template schema version
-      fun.map(function(v)
-        return lua_util.template(v, {SCHEMA_VERSION = tostring(schema_version)})
-      end, fun.chain(clickhouse_schema, settings.schema_additions)))
+  end
+
+  -- Process element and return nil if statement should be skipped
+  local function preprocess_schema_elt(v)
+    if type(v) == 'string' then
+      return lua_util.template(v, {SCHEMA_VERSION = tostring(schema_version)})
+    elseif type(v) == 'table' then
+      -- Pair of statement + boolean
+      if initial == v[2] then
+        return lua_util.template(v[1], {SCHEMA_VERSION = tostring(schema_version)})
+      else
+        rspamd_logger.debugm(N, rspamd_config, 'skip clickhouse schema element %s: schema already exists',
+            v)
+      end
+    end
+
+    return nil
+  end
+
+  -- Apply schema elements sequentially, users additions are concatenated to the tail
+  fun.each(upload_schema_elt,
+    -- Also template schema version
+    fun.filter(function(v) return v ~= nil end,
+      fun.map(preprocess_schema_elt,
+        fun.chain(clickhouse_schema, settings.schema_additions)
+      )
+    )
+  )
 end
 
 local function maybe_apply_migrations(upstream, ev_base, cfg, version)
@@ -1107,6 +1147,51 @@ local function maybe_apply_migrations(upstream, ev_base, cfg, version)
   migration_recursor(version)
 end
 
+local function add_extra_columns(upstream, ev_base, cfg)
+  local ch_params = {
+    ev_base = ev_base,
+    config = cfg,
+  }
+  -- Apply migrations sequentially
+  local function columns_recursor(i)
+    if i <= #settings.extra_columns  then
+      local col = settings.extra_columns[i]
+      local prev_column
+      if i == 1 then
+        prev_column = 'MIMERcpt'
+      else
+        prev_column = settings.extra_columns[i - 1].name
+      end
+      local sql = string.format('ALTER TABLE rspamd ADD COLUMN IF NOT EXISTS `%s` %s AFTER `%s`',
+          col.name, col.type, prev_column)
+      if col.comment then
+        sql = sql .. string.format(", COMMENT COLUMN `%s` '%s'", col.name, col.comment)
+      end
+
+      local ret = lua_clickhouse.generic(upstream, settings, ch_params, sql,
+          function(_, _)
+            rspamd_logger.infox(rspamd_config,
+                'added extra column %s (%s) after %s',
+                col.name, col.type, prev_column)
+            -- Apply the next statement
+            columns_recursor(i + 1)
+          end ,
+          function(_, err)
+            rspamd_logger.errx(rspamd_config,
+                "cannot apply add column alter %s: '%s' on clickhouse server %s: %s",
+                i, sql, upstream:get_addr():to_string(true), err)
+          end)
+      if not ret then
+        rspamd_logger.errx(rspamd_config,
+            "cannot apply add column alter %s: '%s' on clickhouse server %s: cannot make request",
+            i, sql, upstream:get_addr():to_string(true))
+      end
+    end
+  end
+
+  columns_recursor(1)
+end
+
 local function check_rspamd_table(upstream, ev_base, cfg)
   local ch_params = {
     ev_base = ev_base,
@@ -1123,12 +1208,13 @@ local function check_rspamd_table(upstream, ev_base, cfg)
   if rows[1] and rows[1].result then
     if tonumber(rows[1].result) == 1 then
       -- Apply migration
-      rspamd_logger.infox(rspamd_config, 'table rspamd exists, apply migration')
+      upload_clickhouse_schema(upstream, ev_base, cfg, false)
+      rspamd_logger.infox(rspamd_config, 'table rspamd exists, check if we need to apply migrations')
       maybe_apply_migrations(upstream, ev_base, cfg, 1)
     else
       -- Upload schema
       rspamd_logger.infox(rspamd_config, 'table rspamd does not exists, upload full schema')
-      upload_clickhouse_schema(upstream, ev_base, cfg)
+      upload_clickhouse_schema(upstream, ev_base, cfg, true)
     end
   else
     rspamd_logger.errx(rspamd_config,
@@ -1170,8 +1256,13 @@ local function check_clickhouse_upstream(upstream, ev_base, cfg)
         upstream:get_addr():to_string(true), err)
     end
   else
+    upload_clickhouse_schema(upstream, ev_base, cfg, false)
     local version = tonumber(rows[1].v)
     maybe_apply_migrations(upstream, ev_base, cfg, version)
+  end
+
+  if #settings.extra_columns > 0 then
+    add_extra_columns(upstream, ev_base, cfg)
   end
 end
 
@@ -1223,7 +1314,7 @@ if opts then
         end
       end
     else
-      settings[k] = v
+      settings[k] = lua_util.deepcopy(v)
     end
   end
 
@@ -1249,6 +1340,60 @@ if opts then
 
       settings.exceptions = maps_expressions.create(rspamd_config,
           settings.exceptions, N)
+    end
+
+    if settings.extra_columns then
+      -- Check sanity and create selector closures
+      local lua_selectors = require "lua_selectors"
+      local columns_transformed = {}
+      local need_sort = false
+      -- Select traverse function depending on what we have
+      local iter_func = settings.extra_columns[1] and ipairs or pairs
+
+      for col_name,col_data in iter_func(settings.extra_columns) do
+        -- Array based extra columns
+        if col_data.name then col_name = col_data.name end
+        if not col_data.selector or not col_data.type then
+          rspamd_logger.errx(rspamd_config, 'cannot add clickhouse extra row %s: no type or no selector',
+              col_name)
+        else
+          local is_array = false
+
+          if col_data.type:lower():match('^array') then
+            is_array = true
+          end
+
+          local selector = lua_selectors.create_selector_closure(rspamd_config,
+              col_data.selector, col_data.delimiter or '', is_array)
+
+          if not selector then
+            rspamd_logger.errx(rspamd_config, 'cannot add clickhouse extra row %s: bad selector: %s',
+                col_name, col_data.selector)
+          else
+            if not col_data.default_value then
+              if is_array then
+                col_data.default_value = {}
+              else
+                col_data.default_value = ''
+              end
+            end
+            col_data.real_selector = selector
+            if not col_data.name then
+              col_data.name = col_name
+              need_sort = true
+            end
+            table.insert(columns_transformed, col_data)
+          end
+        end
+      end
+
+      -- Convert extra columns from a map to an array sorted by column name to
+      -- preserve strict order when doing altering
+      if need_sort then
+        rspamd_logger.infox(rspamd_config, 'sort extra columns as they are not configured as an array')
+        table.sort(columns_transformed, function(c1, c2) return c1.name < c2.name end)
+      end
+      settings.extra_columns = columns_transformed
     end
 
     rspamd_config:register_symbol({

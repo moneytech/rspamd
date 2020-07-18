@@ -6,7 +6,8 @@
 #define RSPAMD_HTML_H
 
 #include "config.h"
-#include "mem_pool.h"
+#include "libutil/mem_pool.h"
+#include "libserver/url.h"
 
 #ifdef  __cplusplus
 extern "C" {
@@ -41,6 +42,7 @@ enum html_component_type {
 	RSPAMD_HTML_COMPONENT_WIDTH,
 	RSPAMD_HTML_COMPONENT_HEIGHT,
 	RSPAMD_HTML_COMPONENT_SIZE,
+	RSPAMD_HTML_COMPONENT_REL,
 };
 
 struct html_tag_component {
@@ -103,13 +105,14 @@ struct html_block {
 #define FL_IGNORE       (1 << 27)
 #define FL_BLOCK        (1 << 28)
 #define FL_HREF         (1 << 29)
+#define FL_IMAGE        (1 << 30)
 
 struct html_tag {
 	gint id;
 	gint flags;
-	guint content_length;
 	struct html_tag_component name;
-	const gchar *content;
+	guint content_length;
+	goffset content_offset;
 	GQueue *params;
 	gpointer extra; /** Additional data associated with tag (e.g. image) */
 	GNode *parent;
@@ -127,6 +130,7 @@ struct html_content {
 	guchar *tags_seen;
 	GPtrArray *images;
 	GPtrArray *blocks;
+	GByteArray *parsed;
 };
 
 /*
@@ -140,7 +144,9 @@ GByteArray *rspamd_html_process_part (rspamd_mempool_t *pool,
 
 GByteArray *rspamd_html_process_part_full (rspamd_mempool_t *pool,
 										   struct html_content *hc,
-										   GByteArray *in, GList **exceptions, GHashTable *urls, GHashTable *emails);
+										   GByteArray *in, GList **exceptions,
+										   khash_t (rspamd_url_hash) *url_set,
+										   GPtrArray *part_urls);
 
 /*
  * Returns true if a specified tag has been seen in a part
@@ -169,9 +175,6 @@ gint rspamd_html_tag_by_name (const gchar *name);
  * @param comp
  * @return
  */
-struct rspamd_url *rspamd_html_process_url (rspamd_mempool_t *pool,
-											const gchar *start, guint len,
-											struct html_tag_component *comp);
 
 #ifdef  __cplusplus
 }

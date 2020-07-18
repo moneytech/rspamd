@@ -180,7 +180,7 @@ rspamd_stat_process_tokenize (struct rspamd_stat_ctx *st_ctx,
 	}
 
 	rspamd_cryptobox_hash_final (&hst, hout);
-	b32_hout = rspamd_encode_base32 (hout, sizeof (hout));
+	b32_hout = rspamd_encode_base32 (hout, sizeof (hout), RSPAMD_BASE32_DEFAULT);
 	/*
 	 * We need to strip it to 32 characters providing ~160 bits of
 	 * hash distribution
@@ -818,6 +818,8 @@ rspamd_stat_learn (struct rspamd_task *task,
 
 	if (stage == RSPAMD_TASK_STAGE_LEARN_PRE) {
 		/* Process classifiers */
+		rspamd_stat_preprocess (st_ctx, task, TRUE);
+
 		if (!rspamd_stat_cache_check (st_ctx, task, classifier, spam, err)) {
 			return RSPAMD_STAT_PROCESS_ERROR;
 		}
@@ -879,7 +881,7 @@ rspamd_stat_has_classifier_symbols (struct rspamd_task *task,
 		id = g_array_index (cl->statfiles_ids, gint, i);
 		st = g_ptr_array_index (st_ctx->statfiles, id);
 
-		if (rspamd_task_find_symbol_result (task, st->stcf->symbol)) {
+		if (rspamd_task_find_symbol_result (task, st->stcf->symbol, NULL)) {
 			if (is_spam == !!st->stcf->is_spam) {
 				msg_debug_bayes ("do not autolearn %s as symbol %s is already "
 						"added", is_spam ? "spam" : "ham", st->stcf->symbol);

@@ -1,10 +1,11 @@
 {
     "devDependencies": {
         "eslint": "*",
-        "stylelint": "*",
+        "stylelint": "~13.3.3",
         "stylelint-config-standard": "*"
     },
     "eslintIgnore": [
-        "*.min.js"
+        "*.min.js",
+        "prism.js"
     ]
 }

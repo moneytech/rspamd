@@ -35,6 +35,20 @@ RBL RECEIVED HIT
 RBL FROM HIT WL
   ${result} =  Scan Message With Rspamc  ${MESSAGE}  -i  4.3.2.4
   Check Rspamc  ${result}  FAKE_RBL_CODE_2  inverse=True
+  Should Contain  ${result.stdout}  FAKE_WL_RBL_CODE_2 (0.00)[4.3.2.4:from]
+
+EMAILBL Compose Map 1
+  ${result} =  Scan Message With Rspamc  ${TESTDIR}/messages/url14.eml
+  Should Contain  ${result.stdout}  RSPAMD_EMAILBL (0.00)[dirty.sanchez.com:email]
+
+EMAILBL Compose Map 2
+  ${result} =  Scan Message With Rspamc  ${TESTDIR}/messages/url15.eml
+  Should Contain  ${result.stdout}  RSPAMD_EMAILBL (0.00)[very.dirty.sanchez.com:email]
+
+EMAILBL Compose Map 3
+  ${result} =  Scan Message With Rspamc  ${TESTDIR}/messages/url16.eml
+  Should Contain  ${result.stdout}  RSPAMD_EMAILBL (0.00)[41.black.sanchez.com:email]
+
 
 *** Keywords ***
 Rbl Setup

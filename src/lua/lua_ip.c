@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include "lua_common.h"
+#include "libserver/maps/map_helpers.h"
 
 /***
  * @module rspamd_ip
@@ -164,6 +165,13 @@ LUA_FUNCTION_DEF (ip, get_port);
  */
 LUA_FUNCTION_DEF (ip, is_local);
 
+/***
+ * @method ip:less_than(other)
+ * Returns true if address is less than other
+ * @return {boolean}
+ */
+LUA_FUNCTION_DEF (ip, less_than);
+
 static const struct luaL_reg iplib_m[] = {
 	LUA_INTERFACE_DEF (ip, to_string),
 	LUA_INTERFACE_DEF (ip, to_table),
@@ -182,6 +190,7 @@ static const struct luaL_reg iplib_m[] = {
 	{"__tostring", lua_ip_to_string},
 	{"__eq", lua_ip_equal},
 	{"__gc", lua_ip_destroy},
+	{"__lt", lua_ip_less_than},
 	{NULL, NULL}
 };
 
@@ -530,8 +539,42 @@ lua_ip_is_local (lua_State *L)
 			check_laddrs = lua_toboolean (L, 2);
 		}
 
-		lua_pushboolean (L, rspamd_inet_address_is_local (ip->addr,
-				check_laddrs));
+		if ( rspamd_inet_address_is_local (ip->addr)) {
+			lua_pushboolean (L, true);
+
+			return 1;
+		}
+		else if (check_laddrs) {
+			struct rspamd_radix_map_helper *local_addrs =
+					rspamd_inet_library_get_lib_ctx ();
+			if (local_addrs) {
+				if (rspamd_match_radix_map_addr (local_addrs, ip->addr) != NULL) {
+					lua_pushboolean (L, true);
+
+					return 1;
+				}
+			}
+		}
+
+		lua_pushboolean (L, false);
+	}
+	else {
+		lua_pushnil (L);
+	}
+
+	return 1;
+}
+
+static gint
+lua_ip_less_than (lua_State *L)
+{
+	LUA_TRACE_POINT;
+	struct rspamd_lua_ip *ip = lua_check_ip (L, 1),
+			*other = lua_check_ip (L, 2);
+
+	if (ip && other) {
+		lua_pushboolean (L,
+				rspamd_inet_address_compare (ip->addr, other->addr, true) < 0);
 	}
 	else {
 		lua_pushnil (L);

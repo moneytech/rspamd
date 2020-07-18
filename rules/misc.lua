@@ -345,14 +345,14 @@ rspamd_config.HAS_ATTACHMENT = {
 
 -- Requires freemail maps loaded in multimap
 local function freemail_reply_neq_from(task)
-  local frt = task:get_symbol('FREEMAIL_REPLYTO')
-  local ff  = task:get_symbol('FREEMAIL_FROM')
-  if (frt and ff and frt['options'] and ff['options'] and
-      frt['options'][1] ~= ff['options'][1])
-  then
-    return true
+  if not task:has_symbol('FREEMAIL_REPLYTO') or not task:has_symbol('FREEMAIL_FROM') then
+    return false
   end
-  return false
+  local frt = task:get_symbol('FREEMAIL_REPLYTO')
+  local ff = task:get_symbol('FREEMAIL_FROM')
+  local frt_opts = frt[1]['options']
+  local ff_opts = ff[1]['options']
+  return ( frt_opts and ff_opts and frt_opts[1] ~= ff_opts[1] )
 end
 
 rspamd_config:register_symbol({
@@ -685,12 +685,14 @@ local check_encrypted_name = rspamd_config:register_symbol{
     local function check_part(part)
       if part:is_multipart() then
         local children = part:get_children() or {}
+        local text_kids = {}
 
         for _,cld in ipairs(children) do
           if cld:is_multipart() then
             check_part(cld)
           elseif cld:is_text() then
             seen_text = true
+            text_kids[#text_kids + 1] = cld
           else
             local type,subtype,_ = cld:get_type_full()
 
@@ -709,6 +711,17 @@ local check_encrypted_name = rspamd_config:register_symbol{
                 task:insert_result('ENCRYPTED_PGP', 1.0)
               elseif string.find(subtype:lower(), 'pgp%-signature') then
                 task:insert_result('SIGNED_PGP', 1.0)
+              end
+            end
+          end
+          if seen_text and seen_encrypted then
+            -- Ensure that our seen text is not really part of pgp #3205
+            for _,tp in ipairs(text_kids) do
+              local t,_ = tp:get_type()
+              seen_text = false -- reset temporary
+              if t and t == 'text' then
+                seen_text = true
+                break
               end
             end
           end

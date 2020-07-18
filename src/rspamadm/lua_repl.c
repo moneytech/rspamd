@@ -16,9 +16,9 @@
 
 #include "config.h"
 #include "rspamadm.h"
-#include "libutil/http_connection.h"
-#include "libutil/http_private.h"
-#include "libutil/http_router.h"
+#include "libserver/http/http_connection.h"
+#include "libserver/http/http_private.h"
+#include "libserver/http/http_router.h"
 #include "printf.h"
 #include "lua/lua_common.h"
 #include "lua/lua_thread_pool.h"
@@ -610,9 +610,11 @@ static void
 rspamadm_lua_run_repl (lua_State *L, bool is_batch)
 {
 	gchar *input;
+#ifdef WITH_LUA_REPL
 	gboolean is_multiline = FALSE;
 	GString *tb = NULL;
 	gsize i;
+#endif
 
 	for (;;) {
 #ifndef WITH_LUA_REPL
@@ -923,7 +925,7 @@ rspamadm_lua (gint argc, gchar **argv, const struct rspamadm_command *cmd)
 		struct rspamadm_lua_repl_context *ctx;
 
 		if (rspamd_parse_host_port_priority (serve, &addrs, NULL, &name,
-				10000, NULL) == RSPAMD_PARSE_ADDR_FAIL) {
+				10000, TRUE, NULL) == RSPAMD_PARSE_ADDR_FAIL) {
 			fprintf (stderr, "cannot listen on %s", serve);
 			exit (EXIT_FAILURE);
 		}
@@ -944,7 +946,9 @@ rspamadm_lua (gint argc, gchar **argv, const struct rspamadm_command *cmd)
 		for (i = 0; i < addrs->len; i ++) {
 			rspamd_inet_addr_t *addr = g_ptr_array_index (addrs, i);
 
-			fd = rspamd_inet_address_listen (addr, SOCK_STREAM, TRUE);
+			fd = rspamd_inet_address_listen (addr, SOCK_STREAM,
+					RSPAMD_INET_ADDRESS_LISTEN_ASYNC, -1);
+
 			if (fd != -1) {
 				static ev_io ev;
 
@@ -1004,10 +1008,14 @@ rspamadm_lua (gint argc, gchar **argv, const struct rspamadm_command *cmd)
 	rx_instance = replxx_init ();
 #endif
 	if (!batch) {
+#ifdef WITH_LUA_REPL
 		replxx_set_max_history_size (rx_instance, max_history);
 		replxx_history_load (rx_instance, histfile);
+#endif
 		rspamadm_lua_run_repl (L, false);
+#ifdef WITH_LUA_REPL
 		replxx_history_save (rx_instance, histfile);
+#endif
 	} else {
 		rspamadm_lua_run_repl (L, true);
 	}

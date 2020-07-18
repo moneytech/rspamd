@@ -22,8 +22,10 @@
  THE SOFTWARE.
  */
 
-define(["jquery", "d3pie", "humanize"],
-    function ($, d3pie, Humanize) {
+/* global d3:false */
+
+define(["jquery", "d3pie"],
+    function ($) {
         "use strict";
         // @ ms to date
         function msToTime(seconds) {
@@ -68,18 +70,21 @@ define(["jquery", "d3pie", "humanize"],
             $.each(data, function (i, item) {
                 var widget = "";
                 if (i === "auth" || i === "error") return; // Skip to the next iteration
-                if (i === "version") {
-                    widget = "<div class=\"left\"><strong>" + item + "</strong>" +
-                    i + "</div>";
-                    $(widget).appendTo(widgets);
-                } else if (i === "uptime") {
-                    widget = "<div class=\"right\"><strong>" + msToTime(item) +
-                    "</strong>" + i + "</div>";
+                if (i === "uptime" || i === "version") {
+                    var cls = "border-right ";
+                    var val = item;
+                    if (i === "uptime") {
+                        cls = "";
+                        val = msToTime(item);
+                    }
+                    widget = "<div class=\"" + cls + "float-left px-3\"><strong class=\"d-block mt-2 mb-1 font-weight-bold\">" + val +
+                      "</strong>" + i + "</div>";
                     $(widget).appendTo(widgets);
                 } else {
-                    var titleAtt = Humanize.intComma(item) + " " + i;
-                    widget = "<li class=\"stat-box\"><div class=\"widget\" title=\"" + titleAtt + "\"><strong>" +
-                    Humanize.compactInteger(item) + "</strong>" + i + "</div></li>";
+                    var titleAtt = d3.format(",")(item) + " " + i;
+                    widget = "<div class=\"card stat-box d-inline-block text-center bg-light shadow-sm mr-3 px-3\"><div class=\"widget overflow-hidden p-2\" title=\"" +
+                      titleAtt + "\"><strong class=\"d-block mt-2 mb-1 font-weight-bold\">" +
+                    d3.format(".3~s")(item) + "</strong>" + i + "</div></div>";
                     if (i === "scanned") {
                         stat_w[0] = widget;
                     } else if (i === "clean") {
@@ -98,28 +103,31 @@ define(["jquery", "d3pie", "humanize"],
             $.each(stat_w, function (i, item) {
                 $(item).appendTo(widgets);
             });
-            $("#statWidgets .left,#statWidgets .right").wrapAll("<li class=\"stat-box pull-right\"><div class=\"widget\"></div></li>");
-            $("#statWidgets").find("li.pull-right").appendTo("#statWidgets");
+            $("#statWidgets > div:not(.stat-box)")
+                .wrapAll("<div class=\"card stat-box text-center bg-light shadow-sm float-right\"><div class=\"widget overflow-hidden p-2\"></div></div>");
+            $("#statWidgets").find("div.float-right").appendTo("#statWidgets");
 
             $("#clusterTable tbody").empty();
             $("#selSrv").empty();
             $.each(servers, function (key, val) {
-                var glyph_status = "glyphicon glyphicon-remove-circle";
+                var row_class = "danger";
+                var glyph_status = "fas fa-times";
                 var short_id = "???";
                 if (!("config_id" in val.data)) {
                     val.data.config_id = "";
                 }
                 if (val.status) {
-                    glyph_status = "glyphicon glyphicon-ok-circle";
+                    row_class = "success";
+                    glyph_status = "fas fa-check";
                     short_id = val.data.config_id.substring(0, 8);
                 }
 
-                $("#clusterTable tbody").append("<tr>" +
-                "<td class=\"col1\" title=\"Radio\"><input type=\"radio\" class=\"form-control radio\" name=\"clusterName\" value=\"" + key + "\"></td>" +
-                "<td class=\"col2\" title=\"SNAme\">" + key + "</td>" +
-                "<td class=\"col3\" title=\"SHost\">" + val.host + "</td>" +
-                "<td class=\"col4\" title=\"SStatus\"><span class=\"icon\"><i class=\"" + glyph_status + "\"></i></span></td>" +
-                "<td class=\"col5\" title=\"short_id\">" + short_id + "</td></tr>");
+                $("#clusterTable tbody").append("<tr class=\"" + row_class + "\">" +
+                "<td class=\"align-middle\"><input type=\"radio\" class=\"form-check m-auto\" name=\"clusterName\" value=\"" + key + "\"></td>" +
+                "<td>" + key + "</td>" +
+                "<td>" + val.host + "</td>" +
+                "<td class=\"text-center\"><span class=\"icon\"><i class=\"" + glyph_status + "\"></i></span></td>" +
+                "<td>" + short_id + "</td></tr>");
 
                 $("#selSrv").append($("<option value=\"" + key + "\">" + key + "</option>"));
 

@@ -124,7 +124,7 @@ struct rspamd_re_cache {
 	gchar hash[rspamd_cryptobox_HASHBYTES + 1];
 	lua_State *L;
 #ifdef WITH_HYPERSCAN
-	gboolean hyperscan_loaded;
+	enum rspamd_hyperscan_status hyperscan_loaded;
 	gboolean disable_hyperscan;
 	gboolean vectorized_hyperscan;
 	hs_platform_info_t plt;
@@ -241,14 +241,14 @@ rspamd_re_cache_new (void)
 	cache->re = g_ptr_array_new_full (256, rspamd_re_cache_elt_dtor);
 	cache->selectors = kh_init (lua_selectors_hash);
 #ifdef WITH_HYPERSCAN
-	cache->hyperscan_loaded = FALSE;
+	cache->hyperscan_loaded = RSPAMD_HYPERSCAN_UNKNOWN;
 #endif
 	REF_INIT_RETAIN (cache, rspamd_re_cache_destroy);
 
 	return cache;
 }
 
-gboolean
+enum rspamd_hyperscan_status
 rspamd_re_cache_is_hs_loaded (struct rspamd_re_cache *cache)
 {
 	g_assert (cache != NULL);
@@ -256,7 +256,7 @@ rspamd_re_cache_is_hs_loaded (struct rspamd_re_cache *cache)
 #ifdef WITH_HYPERSCAN
 	return cache->hyperscan_loaded;
 #else
-	return FALSE;
+	return RSPAMD_HYPERSCAN_UNSUPPORTED;
 #endif
 }
 
@@ -391,7 +391,7 @@ rspamd_re_cache_init (struct rspamd_re_cache *cache, struct rspamd_config *cfg)
 		rspamd_regexp_set_cache_id (re, i);
 
 		if (re_class->st == NULL) {
-			posix_memalign ((void **)&re_class->st, _Alignof (rspamd_cryptobox_hash_state_t),
+			(void) !posix_memalign ((void **)&re_class->st, _Alignof (rspamd_cryptobox_hash_state_t),
 			 		sizeof (*re_class->st));
 			g_assert (re_class->st != NULL);
 			rspamd_cryptobox_hash_init (re_class->st, NULL, 0);
@@ -673,7 +673,8 @@ rspamd_re_cache_process_regexp_data (struct rspamd_re_runtime *rt,
 		rspamd_regexp_t *re, struct rspamd_task *task,
 		const guchar **in, guint *lens,
 		guint count,
-		gboolean is_raw)
+		gboolean is_raw,
+		gboolean *processed_hyperscan)
 {
 
 	guint64 re_id;
@@ -751,6 +752,7 @@ rspamd_re_cache_process_regexp_data (struct rspamd_re_runtime *rt,
 				}
 				else {
 					ret = rt->results[re_id];
+					*processed_hyperscan = TRUE;
 				}
 			}
 		}
@@ -769,6 +771,7 @@ rspamd_re_cache_process_regexp_data (struct rspamd_re_runtime *rt,
 			}
 			else {
 				ret = rt->results[re_id];
+				*processed_hyperscan = TRUE;
 			}
 		}
 	}
@@ -778,14 +781,17 @@ rspamd_re_cache_process_regexp_data (struct rspamd_re_runtime *rt,
 }
 
 static void
-rspamd_re_cache_finish_class (struct rspamd_re_runtime *rt,
-		struct rspamd_re_class *re_class)
+rspamd_re_cache_finish_class (struct rspamd_task *task,
+							  struct rspamd_re_runtime *rt,
+							  struct rspamd_re_class *re_class,
+							  const gchar *class_name)
 {
 #ifdef WITH_HYPERSCAN
 	guint i;
 	guint64 re_id;
+	guint found = 0;
 
-	/* Set all bits unchecked */
+	/* Set all bits that are not checked and included in hyperscan to 1 */
 	for (i = 0; i < re_class->nhs; i++) {
 		re_id = re_class->hs_ids[i];
 
@@ -794,7 +800,14 @@ rspamd_re_cache_finish_class (struct rspamd_re_runtime *rt,
 			rt->results[re_id] = 0;
 			setbit (rt->checked, re_id);
 		}
+		else {
+			found ++;
+		}
 	}
+
+	msg_debug_re_task ("finished hyperscan for class %s; %d "
+					   "matches found; %d hyperscan supported regexps; %d total regexps",
+			class_name, found, re_class->nhs, (gint)g_hash_table_size (re_class->re));
 #endif
 }
 
@@ -968,7 +981,8 @@ rspamd_re_cache_process_headers_list (struct rspamd_task *task,
 									  rspamd_regexp_t *re,
 									  struct rspamd_re_class *re_class,
 									  struct rspamd_mime_header *rh,
-									  gboolean is_strong)
+									  gboolean is_strong,
+									  gboolean *processed_hyperscan)
 {
 	const guchar **scvec, *in;
 	gboolean raw = FALSE;
@@ -1015,7 +1029,7 @@ rspamd_re_cache_process_headers_list (struct rspamd_task *task,
 
 	if (i > 0) {
 		ret = rspamd_re_cache_process_regexp_data (rt, re,
-				task, scvec, lenvec, i, raw);
+				task, scvec, lenvec, i, raw, processed_hyperscan);
 		msg_debug_re_task ("checking header %s regexp: %s=%*s -> %d",
 				re_class->type_data,
 				rspamd_regexp_get_pattern (re),
@@ -1039,20 +1053,20 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 		gboolean is_strong)
 {
 	guint ret = 0, i, re_id;
-	GHashTableIter it;
 	struct rspamd_mime_header *rh;
 	const gchar *in;
 	const guchar **scvec;
 	guint *lenvec;
-	gboolean raw = FALSE;
+	gboolean raw = FALSE, processed_hyperscan = FALSE;
 	struct rspamd_mime_text_part *text_part;
 	struct rspamd_mime_part *mime_part;
 	struct rspamd_url *url;
-	gpointer k, v;
 	guint len, cnt;
+	const gchar *class_name;
 
-	msg_debug_re_task ("check re type: %s: /%s/",
-			rspamd_re_cache_type_to_string (re_class->type),
+	class_name = rspamd_re_cache_type_to_string (re_class->type);
+	msg_debug_re_task ("start check re type: %s: /%s/",
+			class_name,
 			rspamd_regexp_get_pattern (re));
 	re_id = rspamd_regexp_get_cache_id (re);
 
@@ -1065,7 +1079,11 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 
 		if (rh) {
 			ret = rspamd_re_cache_process_headers_list (task, rt, re,
-					re_class, rh, is_strong);
+					re_class, rh, is_strong, &processed_hyperscan);
+			msg_debug_re_task ("checked header(%s) regexp: %s -> %d",
+					(const char *)re_class->type_data,
+					rspamd_regexp_get_pattern (re),
+					ret);
 		}
 		break;
 	case RSPAMD_RE_ALLHEADER:
@@ -1073,8 +1091,8 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 		in = MESSAGE_FIELD (task, raw_headers_content).begin;
 		len = MESSAGE_FIELD (task, raw_headers_content).len;
 		ret = rspamd_re_cache_process_regexp_data (rt, re,
-				task, (const guchar **)&in, &len, 1, raw);
-		msg_debug_re_task ("checking allheader regexp: %s -> %d",
+				task, (const guchar **)&in, &len, 1, raw, &processed_hyperscan);
+		msg_debug_re_task ("checked allheader regexp: %s -> %d",
 				rspamd_regexp_get_pattern (re), ret);
 		break;
 	case RSPAMD_RE_MIMEHEADER:
@@ -1084,8 +1102,12 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 
 			if (rh) {
 				ret += rspamd_re_cache_process_headers_list (task, rt, re,
-						re_class, rh, is_strong);
+						re_class, rh, is_strong, &processed_hyperscan);
 			}
+			msg_debug_re_task ("checked mime header(%s) regexp: %s -> %d",
+					(const char *)re_class->type_data,
+					rspamd_regexp_get_pattern (re),
+					ret);
 		}
 		break;
 	case RSPAMD_RE_MIME:
@@ -1132,26 +1154,26 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 			}
 
 			ret = rspamd_re_cache_process_regexp_data (rt, re,
-					task, scvec, lenvec, cnt, raw);
-			msg_debug_re_task ("checking mime regexp: %s -> %d",
+					task, scvec, lenvec, cnt, raw, &processed_hyperscan);
+			msg_debug_re_task ("checked mime regexp: %s -> %d",
 					rspamd_regexp_get_pattern (re), ret);
 			g_free (scvec);
 			g_free (lenvec);
 		}
 		break;
 	case RSPAMD_RE_URL:
-		cnt = g_hash_table_size (MESSAGE_FIELD (task, urls)) +
-				g_hash_table_size (MESSAGE_FIELD (task, emails));
+		cnt = kh_size (MESSAGE_FIELD (task, urls));
 
 		if (cnt > 0) {
 			scvec = g_malloc (sizeof (*scvec) * cnt);
 			lenvec = g_malloc (sizeof (*lenvec) * cnt);
-			g_hash_table_iter_init (&it, MESSAGE_FIELD (task, urls));
 			i = 0;
 			raw = FALSE;
 
-			while (g_hash_table_iter_next (&it, &k, &v)) {
-				url = v;
+			kh_foreach_key (MESSAGE_FIELD (task, urls), url, {
+				if ((url->protocol & PROTOCOL_MAILTO)) {
+					continue;
+				}
 				in = url->string;
 				len = url->urllen;
 
@@ -1159,8 +1181,9 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 					scvec[i] = (guchar *) in;
 					lenvec[i++] = len;
 				}
-			}
+			});
 
+#if 0
 			g_hash_table_iter_init (&it, MESSAGE_FIELD (task, emails));
 
 			while (g_hash_table_iter_next (&it, &k, &v)) {
@@ -1173,10 +1196,42 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 					lenvec[i++] = len;
 				}
 			}
+#endif
+			ret = rspamd_re_cache_process_regexp_data (rt, re,
+					task, scvec, lenvec, i, raw, &processed_hyperscan);
+			msg_debug_re_task ("checked url regexp: %s -> %d",
+					rspamd_regexp_get_pattern (re), ret);
+			g_free (scvec);
+			g_free (lenvec);
+		}
+		break;
+	case RSPAMD_RE_EMAIL:
+		cnt = kh_size (MESSAGE_FIELD (task, urls));
+
+		if (cnt > 0) {
+			scvec = g_malloc (sizeof (*scvec) * cnt);
+			lenvec = g_malloc (sizeof (*lenvec) * cnt);
+			i = 0;
+			raw = FALSE;
+
+			kh_foreach_key (MESSAGE_FIELD (task, urls), url, {
+
+				if (!(url->protocol & PROTOCOL_MAILTO)) {
+					continue;
+				}
+				if (url->userlen == 0 || url->hostlen == 0) {
+					continue;
+				}
+
+				in = rspamd_url_user_unsafe (url);
+				len = url->userlen + 1 + url->hostlen;
+				scvec[i] = (guchar *) in;
+				lenvec[i++] = len;
+			});
 
 			ret = rspamd_re_cache_process_regexp_data (rt, re,
-					task, scvec, lenvec, i, raw);
-			msg_debug_re_task ("checking url regexp: %s -> %d",
+					task, scvec, lenvec, i, raw, &processed_hyperscan);
+			msg_debug_re_task ("checked email regexp: %s -> %d",
 					rspamd_regexp_get_pattern (re), ret);
 			g_free (scvec);
 			g_free (lenvec);
@@ -1188,8 +1243,8 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 		len = task->msg.len;
 
 		ret = rspamd_re_cache_process_regexp_data (rt, re, task,
-				(const guchar **)&in, &len, 1, raw);
-		msg_debug_re_task ("checking rawbody regexp: %s -> %d",
+				(const guchar **)&in, &len, 1, raw, &processed_hyperscan);
+		msg_debug_re_task ("checked rawbody regexp: %s -> %d",
 				rspamd_regexp_get_pattern (re), ret);
 		break;
 	case RSPAMD_RE_SABODY:
@@ -1237,8 +1292,8 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 		}
 
 		ret = rspamd_re_cache_process_regexp_data (rt, re,
-				task, scvec, lenvec, cnt, raw);
-		msg_debug_re_task ("checking sa body regexp: %s -> %d",
+				task, scvec, lenvec, cnt, raw, &processed_hyperscan);
+		msg_debug_re_task ("checked sa body regexp: %s -> %d",
 				rspamd_regexp_get_pattern (re), ret);
 		g_free (scvec);
 		g_free (lenvec);
@@ -1274,8 +1329,8 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 			}
 
 			ret = rspamd_re_cache_process_regexp_data (rt, re,
-					task, scvec, lenvec, cnt, raw);
-			msg_debug_re_task ("checking sa rawbody regexp: %s -> %d",
+					task, scvec, lenvec, cnt, raw, &processed_hyperscan);
+			msg_debug_re_task ("checked sa rawbody regexp: %s -> %d",
 					rspamd_regexp_get_pattern (re), ret);
 			g_free (scvec);
 			g_free (lenvec);
@@ -1317,9 +1372,9 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 				}
 
 				ret = rspamd_re_cache_process_regexp_data (rt, re,
-						task, scvec, lenvec, cnt, raw);
+						task, scvec, lenvec, cnt, raw, &processed_hyperscan);
 
-				msg_debug_re_task ("checking sa words regexp: %s -> %d",
+				msg_debug_re_task ("checked sa words regexp: %s -> %d",
 						rspamd_regexp_get_pattern (re), ret);
 				g_free (scvec);
 				g_free (lenvec);
@@ -1333,8 +1388,8 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 				&lenvec, &cnt)) {
 
 			ret = rspamd_re_cache_process_regexp_data (rt, re,
-					task, scvec, lenvec, cnt, raw);
-			msg_debug_re_task ("checking selector (%s) regexp: %s -> %d",
+					task, scvec, lenvec, cnt, raw, &processed_hyperscan);
+			msg_debug_re_task ("checked selector(%s) regexp: %s -> %d",
 					re_class->type_data,
 					rspamd_regexp_get_pattern (re), ret);
 
@@ -1348,8 +1403,8 @@ rspamd_re_cache_exec_re (struct rspamd_task *task,
 	}
 
 #if WITH_HYPERSCAN
-	if (!rt->cache->disable_hyperscan && rt->has_hs) {
-		rspamd_re_cache_finish_class (rt, re_class);
+	if (processed_hyperscan) {
+		rspamd_re_cache_finish_class (task, rt, re_class, class_name);
 	}
 #endif
 
@@ -1510,11 +1565,14 @@ rspamd_re_cache_type_to_string (enum rspamd_re_type type)
 	case RSPAMD_RE_URL:
 		ret = "url";
 		break;
+	case RSPAMD_RE_EMAIL:
+		ret = "email";
+		break;
 	case RSPAMD_RE_SABODY:
 		ret = "sa body";
 		break;
 	case RSPAMD_RE_SARAWBODY:
-		ret = "sa body";
+		ret = "sa raw body";
 		break;
 	case RSPAMD_RE_SELECTOR:
 		ret = "selector";
@@ -1572,6 +1630,9 @@ rspamd_re_cache_type_from_string (const char *str)
 		case G_GUINT64_CONSTANT(0x286edbe164c791d2): /* url */
 		case G_GUINT64_CONSTANT(0x7D9ACDF6685661A1): /* uri */
 			ret = RSPAMD_RE_URL;
+			break;
+		case G_GUINT64_CONSTANT (0x7e232b0f60b571be): /* email */
+			ret = RSPAMD_RE_EMAIL;
 			break;
 		case G_GUINT64_CONSTANT(0x796d62205a8778c7): /* allheader */
 			ret = RSPAMD_RE_ALLHEADER;
@@ -2006,19 +2067,21 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 
 		if (re_class->type_len > 0) {
 			msg_info_re_cache (
-					"compiled class %s(%*s) to cache %6s, %d regexps",
+					"compiled class %s(%*s) to cache %6s, %d/%d regexps",
 					rspamd_re_cache_type_to_string (re_class->type),
 					(gint) re_class->type_len - 1,
 					re_class->type_data,
 					re_class->hash,
-					n);
+					n,
+					(gint)g_hash_table_size (re_class->re));
 		}
 		else {
 			msg_info_re_cache (
-					"compiled class %s to cache %6s, %d regexps",
+					"compiled class %s to cache %6s, %d/%d regexps",
 					rspamd_re_cache_type_to_string (re_class->type),
 					re_class->hash,
-					n);
+					n,
+					(gint)g_hash_table_size (re_class->re));
 		}
 
 		cbdata->total += n;
@@ -2026,25 +2089,42 @@ rspamd_re_cache_compile_timer_cb (EV_P_ ev_timer *w, int revents )
 		g_free (hs_serialized);
 		g_free (hs_ids);
 		g_free (hs_flags);
+
+		/* Now rename temporary file to the new .hs file */
+		rspamd_snprintf (npath, sizeof (path), "%s%c%s.hs", cbdata->cache_dir,
+				G_DIR_SEPARATOR, re_class->hash);
+
+		if (rename (path, npath) == -1) {
+			err = g_error_new (rspamd_re_cache_quark (),
+					errno,
+					"cannot rename %s to %s: %s",
+					path, npath, strerror (errno));
+			unlink (path);
+			close (fd);
+
+			rspamd_re_cache_compile_err (EV_A_ w, err, cbdata);
+			return;
+		}
+
+		close (fd);
 	}
-
-	/* Now rename temporary file to the new .hs file */
-	rspamd_snprintf (npath, sizeof (path), "%s%c%s.hs", cbdata->cache_dir,
-			G_DIR_SEPARATOR, re_class->hash);
-
-	if (rename (path, npath) == -1) {
+	else {
 		err = g_error_new (rspamd_re_cache_quark (),
 				errno,
-				"cannot rename %s to %s: %s",
-				path, npath, strerror (errno));
+				"no suitable regular expressions %s (%d original): "
+				"remove temporary file %s",
+				rspamd_re_cache_type_to_string (re_class->type),
+				(gint)g_hash_table_size (re_class->re),
+				path);
+
 		unlink (path);
 		close (fd);
-
 		rspamd_re_cache_compile_err (EV_A_ w, err, cbdata);
+
 		return;
 	}
 
-	close (fd);
+	/* Continue process */
 	ev_timer_again (EV_A_ w);
 }
 
@@ -2284,15 +2364,15 @@ rspamd_re_cache_is_valid_hyperscan_file (struct rspamd_re_cache *cache,
 }
 
 
-gboolean
+enum rspamd_hyperscan_status
 rspamd_re_cache_load_hyperscan (struct rspamd_re_cache *cache,
-		const char *cache_dir)
+		const char *cache_dir, bool try_load)
 {
 	g_assert (cache != NULL);
 	g_assert (cache_dir != NULL);
 
 #ifndef WITH_HYPERSCAN
-	return FALSE;
+	return RSPAMD_HYPERSCAN_UNSUPPORTED;
 #else
 	gchar path[PATH_MAX];
 	gint fd, i, n, *hs_ids = NULL, *hs_flags = NULL, total = 0, ret;
@@ -2302,6 +2382,7 @@ rspamd_re_cache_load_hyperscan (struct rspamd_re_cache *cache,
 	struct rspamd_re_class *re_class;
 	struct rspamd_re_cache_elt *elt;
 	struct stat st;
+	gboolean has_valid = FALSE, all_valid = FALSE;
 
 	g_hash_table_iter_init (&it, cache->re_classes);
 
@@ -2310,7 +2391,7 @@ rspamd_re_cache_load_hyperscan (struct rspamd_re_cache *cache,
 		rspamd_snprintf (path, sizeof (path), "%s%c%s.hs", cache_dir,
 				G_DIR_SEPARATOR, re_class->hash);
 
-		if (rspamd_re_cache_is_valid_hyperscan_file (cache, path, FALSE, FALSE)) {
+		if (rspamd_re_cache_is_valid_hyperscan_file (cache, path, try_load, FALSE)) {
 			msg_debug_re_cache ("load hyperscan database from '%s'",
 					re_class->hash);
 
@@ -2323,9 +2404,16 @@ rspamd_re_cache_load_hyperscan (struct rspamd_re_cache *cache,
 			map = mmap (NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
 
 			if (map == MAP_FAILED) {
-				msg_err_re_cache ("cannot mmap %s: %s", path, strerror (errno));
+				if (!try_load) {
+					msg_err_re_cache ("cannot mmap %s: %s", path, strerror (errno));
+				}
+				else {
+					msg_debug_re_cache ("cannot mmap %s: %s", path, strerror (errno));
+				}
+
 				close (fd);
-				return FALSE;
+				all_valid = FALSE;
+				continue;
 			}
 
 			close (fd);
@@ -2338,10 +2426,18 @@ rspamd_re_cache_load_hyperscan (struct rspamd_re_cache *cache,
 							RSPAMD_HS_MAGIC_LEN + /* header */
 							sizeof (cache->plt) > (gsize)st.st_size) {
 				/* Some wrong amount of regexps */
-				msg_err_re_cache ("bad number of expressions in %s: %d",
-						path, n);
+				if (!try_load) {
+					msg_err_re_cache ("bad number of expressions in %s: %d",
+							path, n);
+				}
+				else {
+					msg_debug_re_cache ("bad number of expressions in %s: %d",
+							path, n);
+				}
+
 				munmap (map, st.st_size);
-				return FALSE;
+				all_valid = FALSE;
+				continue;
 			}
 
 			total += n;
@@ -2374,12 +2470,22 @@ rspamd_re_cache_load_hyperscan (struct rspamd_re_cache *cache,
 
 			if ((ret = hs_deserialize_database (p, end - p, &re_class->hs_db))
 					!= HS_SUCCESS) {
-				msg_err_re_cache ("bad hs database in %s: %d", path, ret);
+				if (!try_load) {
+					msg_err_re_cache ("bad hs database in %s: %d", path, ret);
+				}
+				else {
+					msg_debug_re_cache ("bad hs database in %s: %d", path, ret);
+				}
 				munmap (map, st.st_size);
 				g_free (hs_ids);
 				g_free (hs_flags);
 
-				return FALSE;
+				re_class->hs_ids = NULL;
+				re_class->hs_scratch = NULL;
+				re_class->hs_db = NULL;
+				all_valid = FALSE;
+
+				continue;
 			}
 
 			munmap (map, st.st_size);
@@ -2406,18 +2512,44 @@ rspamd_re_cache_load_hyperscan (struct rspamd_re_cache *cache,
 			re_class->hs_ids = hs_ids;
 			g_free (hs_flags);
 			re_class->nhs = n;
+
+			if (!has_valid) {
+				has_valid = TRUE;
+				all_valid = TRUE;
+			}
 		}
 		else {
-			msg_err_re_cache ("invalid hyperscan hash file '%s'",
-					path);
-			return FALSE;
+			if (!try_load) {
+				msg_err_re_cache ("invalid hyperscan hash file '%s'",
+						path);
+			}
+			else {
+				msg_debug_re_cache ("invalid hyperscan hash file '%s'",
+						path);
+			}
+			all_valid = FALSE;
+			continue;
 		}
 	}
 
-	msg_info_re_cache ("hyperscan database of %d regexps has been loaded", total);
-	cache->hyperscan_loaded = TRUE;
+	if (has_valid) {
+		if (all_valid) {
+			msg_info_re_cache ("full hyperscan database of %d regexps has been loaded", total);
+			cache->hyperscan_loaded = RSPAMD_HYPERSCAN_LOADED_FULL;
+		}
+		else {
+			msg_info_re_cache ("partial hyperscan database of %d regexps has been loaded", total);
+			cache->hyperscan_loaded = RSPAMD_HYPERSCAN_LOADED_PARTIAL;
+		}
+	}
+	else {
+		msg_info_re_cache ("hyperscan database has NOT been loaded; no valid expressions");
+		cache->hyperscan_loaded = RSPAMD_HYPERSCAN_LOAD_ERROR;
+	}
 
-	return TRUE;
+
+
+	return cache->hyperscan_loaded;
 #endif
 }
 

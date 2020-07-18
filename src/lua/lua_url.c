@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 #include "lua_common.h"
-#include "contrib/uthash/utlist.h"
+#include "lua_url.h"
+
 
 /***
  * @module rspamd_url
@@ -158,8 +159,8 @@ lua_url_get_host (lua_State *L)
 	LUA_TRACE_POINT;
 	struct rspamd_lua_url *url = lua_check_url (L, 1);
 
-	if (url != NULL) {
-		lua_pushlstring (L, url->url->host, url->url->hostlen);
+	if (url != NULL && url->url && url->url->hostlen > 0) {
+		lua_pushlstring (L, rspamd_url_host (url->url), url->url->hostlen);
 	}
 	else {
 		lua_pushnil (L);
@@ -198,8 +199,8 @@ lua_url_get_user (lua_State *L)
 	LUA_TRACE_POINT;
 	struct rspamd_lua_url *url = lua_check_url (L, 1);
 
-	if (url != NULL && url->url->user != NULL) {
-		lua_pushlstring (L, url->url->user, url->url->userlen);
+	if (url != NULL && rspamd_url_user (url->url) != NULL) {
+		lua_pushlstring (L, rspamd_url_user (url->url), url->url->userlen);
 	}
 	else {
 		lua_pushnil (L);
@@ -220,7 +221,7 @@ lua_url_get_path (lua_State *L)
 	struct rspamd_lua_url *url = lua_check_url (L, 1);
 
 	if (url != NULL && url->url->datalen > 0) {
-		lua_pushlstring (L, url->url->data, url->url->datalen);
+		lua_pushlstring (L, rspamd_url_data_unsafe (url->url), url->url->datalen);
 	}
 	else {
 		lua_pushnil (L);
@@ -241,7 +242,7 @@ lua_url_get_query (lua_State *L)
 	struct rspamd_lua_url *url = lua_check_url (L, 1);
 
 	if (url != NULL && url->url->querylen > 0) {
-		lua_pushlstring (L, url->url->query, url->url->querylen);
+		lua_pushlstring (L, rspamd_url_query_unsafe (url->url), url->url->querylen);
 	}
 	else {
 		lua_pushnil (L);
@@ -262,7 +263,7 @@ lua_url_get_fragment (lua_State *L)
 	struct rspamd_lua_url *url = lua_check_url (L, 1);
 
 	if (url != NULL && url->url->fragmentlen > 0) {
-		lua_pushlstring (L, url->url->fragment, url->url->fragmentlen);
+		lua_pushlstring (L, rspamd_url_fragment_unsafe (url->url), url->url->fragmentlen);
 	}
 	else {
 		lua_pushnil (L);
@@ -307,9 +308,12 @@ lua_url_tostring (lua_State *L)
 		if (url->url->protocol == PROTOCOL_MAILTO) {
 			gchar *tmp = g_malloc (url->url->userlen + 1 +
 								   url->url->hostlen);
-			memcpy (tmp, url->url->user, url->url->userlen);
+			if (url->url->userlen) {
+				memcpy (tmp, url->url->string + url->url->usershift, url->url->userlen);
+			}
+
 			tmp[url->url->userlen] = '@';
-			memcpy (tmp + url->url->userlen + 1, url->url->host,
+			memcpy (tmp + url->url->userlen + 1, rspamd_url_host_unsafe (url->url),
 					url->url->hostlen);
 
 			lua_pushlstring (L, tmp, url->url->userlen + 1 + url->url->hostlen);
@@ -557,7 +561,7 @@ lua_url_get_tld (lua_State *L)
 	struct rspamd_lua_url *url = lua_check_url (L, 1);
 
 	if (url != NULL && url->url->tldlen > 0) {
-		lua_pushlstring (L, url->url->tld, url->url->tldlen);
+		lua_pushlstring (L, rspamd_url_tld_unsafe (url->url), url->url->tldlen);
 	}
 	else {
 		lua_pushnil (L);
@@ -657,7 +661,7 @@ lua_url_to_table (lua_State *L)
 
 		if (u->hostlen > 0) {
 			lua_pushstring (L, "host");
-			lua_pushlstring (L, u->host, u->hostlen);
+			lua_pushlstring (L, rspamd_url_host_unsafe (u), u->hostlen);
 			lua_settable (L, -3);
 		}
 
@@ -669,31 +673,31 @@ lua_url_to_table (lua_State *L)
 
 		if (u->tldlen > 0) {
 			lua_pushstring (L, "tld");
-			lua_pushlstring (L, u->tld, u->tldlen);
+			lua_pushlstring (L, rspamd_url_tld_unsafe (u), u->tldlen);
 			lua_settable (L, -3);
 		}
 
 		if (u->userlen > 0) {
 			lua_pushstring (L, "user");
-			lua_pushlstring (L, u->user, u->userlen);
+			lua_pushlstring (L, rspamd_url_user (u), u->userlen);
 			lua_settable (L, -3);
 		}
 
 		if (u->datalen > 0) {
 			lua_pushstring (L, "path");
-			lua_pushlstring (L, u->data, u->datalen);
+			lua_pushlstring (L, rspamd_url_data_unsafe (u), u->datalen);
 			lua_settable (L, -3);
 		}
 
 		if (u->querylen > 0) {
 			lua_pushstring (L, "query");
-			lua_pushlstring (L, u->query, u->querylen);
+			lua_pushlstring (L, rspamd_url_query_unsafe (u), u->querylen);
 			lua_settable (L, -3);
 		}
 
 		if (u->fragmentlen > 0) {
 			lua_pushstring (L, "fragment");
-			lua_pushlstring (L, u->fragment, u->fragmentlen);
+			lua_pushlstring (L, rspamd_url_fragment_unsafe (u), u->fragmentlen);
 			lua_settable (L, -3);
 		}
 
@@ -711,7 +715,7 @@ lua_url_to_table (lua_State *L)
 
 
 /***
- * @function url.create([mempool,] str)
+ * @function url.create([mempool,] str, [{flags_table}])
  * @param {rspamd_mempool} memory pool for URL, e.g. `task:get_mempool()`
  * @param {string} text that contains URL (can also contain other stuff)
  * @return {url} new url object that exists as long as the corresponding mempool exists
@@ -724,6 +728,7 @@ lua_url_create (lua_State *L)
 	const gchar *text;
 	size_t length;
 	gboolean own_pool = FALSE;
+	struct rspamd_lua_url *u;
 
 	if (lua_type (L, 1) == LUA_TUSERDATA) {
 		pool = rspamd_lua_check_mempool (L, 1);
@@ -749,6 +754,26 @@ lua_url_create (lua_State *L)
 		if (lua_type (L, -1) != LUA_TUSERDATA) {
 			/* URL is actually not found */
 			lua_pushnil (L);
+
+			return 1;
+		}
+
+		u = (struct rspamd_lua_url *)lua_touserdata (L, -1);
+
+		if (lua_type (L, 3) == LUA_TTABLE) {
+			/* Add flags */
+			for (lua_pushnil (L); lua_next (L, 3); lua_pop (L, 1)) {
+				int nmask = 0;
+				const gchar *fname = lua_tostring (L, -1);
+
+				if (rspamd_url_flag_from_string (fname, &nmask)) {
+					u->url->flags |= nmask;
+				}
+				else {
+					lua_pop (L, 1);
+					return luaL_error (L, "invalid flag: %s", fname);
+				}
+			}
 		}
 	}
 
@@ -850,9 +875,9 @@ lua_url_all (lua_State *L)
  * - `image`: URL is from src attribute of img HTML tag
  * @return {table} URL flags
  */
-#define PUSH_FLAG(fl, name) do { \
+#define PUSH_FLAG(fl) do { \
 	if (flags & (fl)) { \
-		lua_pushstring (L, (name)); \
+		lua_pushstring (L, rspamd_url_flag_to_string (fl)); \
 		lua_pushboolean (L, true); \
 		lua_settable (L, -3); \
 	} \
@@ -870,26 +895,27 @@ lua_url_get_flags (lua_State *L)
 
 		lua_createtable (L, 0, 4);
 
-		PUSH_FLAG (RSPAMD_URL_FLAG_PHISHED, "phished");
-		PUSH_FLAG (RSPAMD_URL_FLAG_NUMERIC, "numeric");
-		PUSH_FLAG (RSPAMD_URL_FLAG_OBSCURED, "obscured");
-		PUSH_FLAG (RSPAMD_URL_FLAG_REDIRECTED, "redirected");
-		PUSH_FLAG (RSPAMD_URL_FLAG_HTML_DISPLAYED, "html_displayed");
-		PUSH_FLAG (RSPAMD_URL_FLAG_FROM_TEXT, "text");
-		PUSH_FLAG (RSPAMD_URL_FLAG_SUBJECT, "subject");
-		PUSH_FLAG (RSPAMD_URL_FLAG_HOSTENCODED, "host_encoded");
-		PUSH_FLAG (RSPAMD_URL_FLAG_SCHEMAENCODED, "schema_encoded");
-		PUSH_FLAG (RSPAMD_URL_FLAG_PATHENCODED, "path_encoded");
-		PUSH_FLAG (RSPAMD_URL_FLAG_QUERYENCODED, "query_encoded");
-		PUSH_FLAG (RSPAMD_URL_FLAG_MISSINGSLASHES, "missing_slahes");
-		PUSH_FLAG (RSPAMD_URL_FLAG_IDN, "idn");
-		PUSH_FLAG (RSPAMD_URL_FLAG_HAS_PORT, "has_port");
-		PUSH_FLAG (RSPAMD_URL_FLAG_HAS_USER, "has_user");
-		PUSH_FLAG (RSPAMD_URL_FLAG_SCHEMALESS, "schemaless");
-		PUSH_FLAG (RSPAMD_URL_FLAG_UNNORMALISED, "unnormalised");
-		PUSH_FLAG (RSPAMD_URL_FLAG_ZW_SPACES, "zw_spaces");
-		PUSH_FLAG (RSPAMD_URL_FLAG_DISPLAY_URL, "url_displayed");
-		PUSH_FLAG (RSPAMD_URL_FLAG_IMAGE, "image");
+		PUSH_FLAG (RSPAMD_URL_FLAG_PHISHED);
+		PUSH_FLAG (RSPAMD_URL_FLAG_NUMERIC);
+		PUSH_FLAG (RSPAMD_URL_FLAG_OBSCURED);
+		PUSH_FLAG (RSPAMD_URL_FLAG_REDIRECTED);
+		PUSH_FLAG (RSPAMD_URL_FLAG_HTML_DISPLAYED);
+		PUSH_FLAG (RSPAMD_URL_FLAG_FROM_TEXT);
+		PUSH_FLAG (RSPAMD_URL_FLAG_SUBJECT);
+		PUSH_FLAG (RSPAMD_URL_FLAG_HOSTENCODED);
+		PUSH_FLAG (RSPAMD_URL_FLAG_SCHEMAENCODED);
+		PUSH_FLAG (RSPAMD_URL_FLAG_PATHENCODED);
+		PUSH_FLAG (RSPAMD_URL_FLAG_QUERYENCODED);
+		PUSH_FLAG (RSPAMD_URL_FLAG_MISSINGSLASHES);
+		PUSH_FLAG (RSPAMD_URL_FLAG_IDN);
+		PUSH_FLAG (RSPAMD_URL_FLAG_HAS_PORT);
+		PUSH_FLAG (RSPAMD_URL_FLAG_HAS_USER);
+		PUSH_FLAG (RSPAMD_URL_FLAG_SCHEMALESS);
+		PUSH_FLAG (RSPAMD_URL_FLAG_UNNORMALISED);
+		PUSH_FLAG (RSPAMD_URL_FLAG_ZW_SPACES);
+		PUSH_FLAG (RSPAMD_URL_FLAG_DISPLAY_URL);
+		PUSH_FLAG (RSPAMD_URL_FLAG_IMAGE);
+		PUSH_FLAG (RSPAMD_URL_FLAG_CONTENT);
 	}
 	else {
 		return luaL_error (L, "invalid arguments");
@@ -899,6 +925,289 @@ lua_url_get_flags (lua_State *L)
 }
 
 #undef PUSH_FLAG
+
+void
+lua_tree_url_callback (gpointer key, gpointer value, gpointer ud)
+{
+	struct rspamd_lua_url *lua_url;
+	struct rspamd_url *url = (struct rspamd_url *)value;
+	struct lua_tree_cb_data *cb = ud;
+
+	if ((url->protocol & cb->protocols_mask) == url->protocol) {
+
+		if (cb->flags_mode == url_flags_mode_include_any) {
+			if (url->flags != (url->flags & cb->flags_mask)) {
+				return;
+			}
+		}
+		else {
+			if ((url->flags & cb->flags_mask) != cb->flags_mask) {
+				return;
+			}
+		}
+
+		if (cb->skip_prob > 0) {
+			gdouble coin = rspamd_random_double_fast_seed (cb->xoroshiro_state);
+
+			if (coin < cb->skip_prob) {
+				return;
+			}
+		}
+
+		lua_url = lua_newuserdata (cb->L, sizeof (struct rspamd_lua_url));
+		lua_pushvalue (cb->L, cb->metatable_pos);
+		lua_setmetatable (cb->L, -2);
+		lua_url->url = url;
+		lua_rawseti (cb->L, -2, cb->i++);
+	}
+}
+
+gboolean
+lua_url_cbdata_fill (lua_State *L,
+					 gint pos,
+					 struct lua_tree_cb_data *cbd,
+					 guint default_protocols,
+					 guint default_flags,
+					 gsize max_urls)
+{
+	gint protocols_mask = 0;
+
+	gint pos_arg_type = lua_type (L, pos);
+	guint flags_mask = default_flags;
+	gboolean seen_flags = FALSE, seen_protocols = FALSE;
+
+	memset (cbd, 0, sizeof (*cbd));
+	cbd->flags_mode = url_flags_mode_include_any;
+
+	if (pos_arg_type == LUA_TBOOLEAN) {
+		protocols_mask = default_protocols;
+		if (lua_toboolean (L, 2)) {
+			protocols_mask |= PROTOCOL_MAILTO;
+		}
+	}
+	else if (pos_arg_type == LUA_TTABLE) {
+		if (rspamd_lua_geti (L, 1, pos) == LUA_TNIL) {
+			/* New method: indexed table */
+
+			lua_getfield (L, pos, "flags");
+			if (lua_istable (L, -1)) {
+				gint top = lua_gettop (L);
+
+				lua_getfield (L, pos, "flags_mode");
+				if (lua_isstring (L, -1)) {
+					const gchar *mode_str = lua_tostring (L, -1);
+
+					if (strcmp (mode_str, "explicit") == 0) {
+						cbd->flags_mode = url_flags_mode_include_explicit;
+						/*
+						 * Ignore default flags in this mode and include
+						 * merely flags specified by a caller
+						 */
+						flags_mask = 0;
+					}
+				}
+				lua_pop (L, 1);
+
+				for (lua_pushnil (L); lua_next (L, top); lua_pop (L, 1)) {
+					int nmask = 0;
+					const gchar *fname = lua_tostring (L, -1);
+
+
+					if (rspamd_url_flag_from_string (fname, &nmask)) {
+						flags_mask |= nmask;
+					}
+					else {
+						msg_info ("bad url flag: %s", fname);
+						return FALSE;
+					}
+				}
+
+				seen_flags = TRUE;
+			}
+			else {
+				flags_mask |= default_flags;
+			}
+			lua_pop (L, 1);
+
+			lua_getfield (L, pos, "protocols");
+			if (lua_istable (L, -1)) {
+				gint top = lua_gettop (L);
+
+				for (lua_pushnil (L); lua_next (L, top); lua_pop (L, 1)) {
+					int nmask;
+					const gchar *pname = lua_tostring (L, -1);
+
+					nmask = rspamd_url_protocol_from_string (pname);
+
+					if (nmask != PROTOCOL_UNKNOWN) {
+						protocols_mask |= nmask;
+					}
+					else {
+						msg_info ("bad url protocol: %s", pname);
+						return FALSE;
+					}
+				}
+				seen_protocols = TRUE;
+			}
+			else {
+				protocols_mask = default_protocols;
+			}
+			lua_pop (L, 1);
+
+			if (!seen_protocols) {
+				lua_getfield (L, pos, "emails");
+				if (lua_isboolean (L, -1)) {
+					if (lua_toboolean (L, -1)) {
+						protocols_mask |= PROTOCOL_MAILTO;
+					}
+				}
+				lua_pop (L, 1);
+			}
+
+			if (!seen_flags) {
+				lua_getfield (L, pos, "images");
+				if (lua_isboolean (L, -1)) {
+					if (lua_toboolean (L, -1)) {
+						flags_mask |= RSPAMD_URL_FLAG_IMAGE;
+					}
+					else {
+						flags_mask &= ~RSPAMD_URL_FLAG_IMAGE;
+					}
+				}
+				else {
+					flags_mask &= ~RSPAMD_URL_FLAG_IMAGE;
+				}
+				lua_pop (L, 1);
+			}
+
+			if (!seen_flags) {
+				lua_getfield (L, pos, "content");
+				if (lua_isboolean (L, -1)) {
+					if (lua_toboolean (L, -1)) {
+						flags_mask |= RSPAMD_URL_FLAG_CONTENT;
+					}
+					else {
+						flags_mask &= ~RSPAMD_URL_FLAG_CONTENT;
+					}
+				}
+				else {
+					flags_mask &= ~RSPAMD_URL_FLAG_CONTENT;
+				}
+				lua_pop (L, 1);
+			}
+
+			lua_getfield (L, pos, "max_urls");
+			if (lua_isnumber (L, -1)) {
+				max_urls = lua_tonumber (L, -1);
+			}
+			lua_pop (L, 1);
+		}
+		else {
+			/* Plain table of the protocols */
+			for (lua_pushnil (L); lua_next (L, pos); lua_pop (L, 1)) {
+				int nmask;
+				const gchar *pname = lua_tostring (L, -1);
+
+				nmask = rspamd_url_protocol_from_string (pname);
+
+				if (nmask != PROTOCOL_UNKNOWN) {
+					protocols_mask |= nmask;
+				}
+				else {
+					msg_info ("bad url protocol: %s", pname);
+					return FALSE;
+				}
+			}
+		}
+
+		lua_pop (L, 1); /* After rspamd_lua_geti */
+	}
+	else if (pos_arg_type == LUA_TSTRING) {
+		const gchar *plist = lua_tostring (L, pos);
+		gchar **strvec;
+		gchar * const *cvec;
+
+		strvec = g_strsplit_set (plist, ",;", -1);
+		cvec = strvec;
+
+		while (*cvec) {
+			int nmask;
+
+			nmask = rspamd_url_protocol_from_string (*cvec);
+
+			if (nmask != PROTOCOL_UNKNOWN) {
+				protocols_mask |= nmask;
+			}
+			else {
+				msg_info ("bad url protocol: %s", *cvec);
+				return FALSE;
+			}
+
+			cvec ++;
+		}
+
+		g_strfreev (strvec);
+	}
+	else if (pos_arg_type == LUA_TNONE || pos_arg_type == LUA_TNIL) {
+		protocols_mask = default_protocols;
+		flags_mask = default_flags;
+	}
+	else {
+		return FALSE;
+	}
+
+	if (lua_type (L, pos + 1) == LUA_TBOOLEAN) {
+		if (lua_toboolean (L, pos + 1)) {
+			flags_mask |= RSPAMD_URL_FLAG_IMAGE;
+		}
+		else {
+			flags_mask &= ~RSPAMD_URL_FLAG_IMAGE;
+		}
+	}
+
+	cbd->i = 1;
+	cbd->L = L;
+	cbd->max_urls = max_urls;
+	cbd->protocols_mask = protocols_mask;
+	cbd->flags_mask = flags_mask;
+
+	/* This needs to be removed from the stack */
+	rspamd_lua_class_metatable (L, "rspamd{url}");
+	cbd->metatable_pos = lua_gettop (L);
+	(void)lua_checkstack (L, cbd->metatable_pos + 4);
+
+	return TRUE;
+}
+
+void
+lua_url_cbdata_dtor (struct lua_tree_cb_data *cbd)
+{
+	if (cbd->metatable_pos != -1) {
+		lua_remove (cbd->L, cbd->metatable_pos);
+	}
+}
+
+gsize
+lua_url_adjust_skip_prob (gdouble timestamp,
+						  guchar *digest,
+						  struct lua_tree_cb_data *cb,
+						  gsize sz)
+{
+	if (cb->max_urls > 0 && sz > cb->max_urls) {
+		cb->skip_prob = 1.0 - ((gdouble)cb->max_urls) / (gdouble)sz;
+		/*
+		 * Use task dependent probabilistic seed to ensure that
+		 * consequent task:get_urls return the same list of urls
+		 */
+		memcpy (&cb->xoroshiro_state[0], &timestamp,
+				MIN (sizeof (cb->xoroshiro_state[0]), sizeof (timestamp)));
+		memcpy (&cb->xoroshiro_state[1], digest,
+				sizeof (cb->xoroshiro_state[1]) * 3);
+		sz = cb->max_urls;
+	}
+
+	return sz;
+}
 
 static gint
 lua_load_url (lua_State * L)

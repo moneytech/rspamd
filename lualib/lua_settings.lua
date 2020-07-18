@@ -57,13 +57,14 @@ local function register_settings_cb()
       if s.symbols_enabled then
         -- Remove all symbols from set.symbols aside of explicit_disable symbols
         set.symbols = lua_util.list_to_hash(explicit_symbols)
+        seen_enabled = true
         for _,sym in ipairs(s.symbols_enabled) do
           enabled_symbols[sym] = true
           set.symbols[sym] = true
-          seen_enabled = true
         end
       end
       if s.groups_enabled then
+        seen_enabled = true
         for _,gr in ipairs(s.groups_enabled) do
           local syms = rspamd_config:get_group_symbols(gr)
 
@@ -71,7 +72,6 @@ local function register_settings_cb()
             for _,sym in ipairs(syms) do
               enabled_symbols[sym] = true
               set.symbols[sym] = true
-              seen_enabled = true
             end
           end
         end
@@ -79,20 +79,20 @@ local function register_settings_cb()
 
       -- Disabled map
       if s.symbols_disabled then
+        seen_disabled = true
         for _,sym in ipairs(s.symbols_disabled) do
           disabled_symbols[sym] = true
           set.symbols[sym] = false
-          seen_disabled = true
         end
       end
       if s.groups_disabled then
+        seen_disabled = true
         for _,gr in ipairs(s.groups_disabled) do
           local syms = rspamd_config:get_group_symbols(gr)
 
           if syms then
             for _,sym in ipairs(syms) do
               disabled_symbols[sym] = true
-              seen_disabled = true
               set.symbols[sym] = false
             end
           end
@@ -170,6 +170,8 @@ local function numeric_settings_id(str)
   return ret
 end
 
+exports.numeric_settings_id = numeric_settings_id
+
 -- Used to do the following:
 -- If there is a group of symbols_allowed, it checks if that is an array
 -- If that is a hash table then we transform it to a normal list, probably adding symbols to adjust scores
@@ -240,6 +242,7 @@ local function register_settings_id(str, settings)
   else
     known_ids[numeric_id] = {
       name = str,
+      id = numeric_id,
       settings = transform_settings_maybe(settings, str),
       symbols = {}
     }

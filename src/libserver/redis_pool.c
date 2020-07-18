@@ -185,13 +185,18 @@ rspamd_redis_on_quit (redisAsyncContext *c, gpointer r, gpointer priv)
 	msg_debug_rpool ("quit command reply for the connection %p, refcount: %d",
 			conn->ctx, conn->ref.refcount);
 	/*
-	 * We now schedule timer to enforce removal after callback is executed
-	 * to prevent races. But actually, the connection will likely be freed by
-	 * hiredis itself. It is quite brain damaged logic but it is better to
-	 * deal with it... Dtor will definitely stop this timer.
+	 * The connection will be freed by hiredis itself as we are here merely after
+	 * quit command has succeeded and we have timer being set already.
+	 * The problem is that when this callback is called, our connection is likely
+	 * dead, so probably even on_disconnect callback has been already called...
+	 *
+	 * Hence, the connection might already be freed, so even (conn) pointer may be
+	 * inaccessible.
+	 *
+	 * TODO: Use refcounts to prevent this stuff to happen, the problem is how
+	 * to handle Redis timeout on `quit` command in fact... The good thing is that
+	 * it will not likely happen.
 	 */
-	conn->timeout.repeat = 0.1;
-	ev_timer_again (conn->elt->pool->event_loop, &conn->timeout);
 }
 
 static void
@@ -205,18 +210,19 @@ rspamd_redis_conn_timeout (EV_P_ ev_timer *w, int revents)
 	if (conn->state == RSPAMD_REDIS_POOL_CONN_INACTIVE) {
 		msg_debug_rpool ("scheduled soft removal of connection %p, refcount: %d",
 				conn->ctx, conn->ref.refcount);
-		redisAsyncCommand (conn->ctx, rspamd_redis_on_quit, conn, "QUIT");
-		conn->state = RSPAMD_REDIS_POOL_CONN_FINALISING;
-		ev_timer_again (EV_A_ w);
-
 		/* Prevent reusing */
 		if (conn->entry) {
 			g_queue_unlink (conn->elt->inactive, conn->entry);
 			conn->entry = NULL;
 		}
+
+		conn->state = RSPAMD_REDIS_POOL_CONN_FINALISING;
+		ev_timer_again (EV_A_ w);
+		redisAsyncCommand (conn->ctx, rspamd_redis_on_quit, conn, "QUIT");
 	}
 	else {
 		/* Finalising by timeout */
+		ev_timer_stop (EV_A_ w);
 		msg_debug_rpool ("final removal of connection %p, refcount: %d",
 				conn->ctx, conn->ref.refcount);
 		REF_RELEASE (conn);
@@ -252,10 +258,9 @@ rspamd_redis_pool_schedule_timeout (struct rspamd_redis_pool_connection *conn)
 }
 
 static void
-rspamd_redis_pool_on_disconnect (const struct redisAsyncContext *ac, int status,
-		void *ud)
+rspamd_redis_pool_on_disconnect (const struct redisAsyncContext *ac, int status)
 {
-	struct rspamd_redis_pool_connection *conn = ud;
+	struct rspamd_redis_pool_connection *conn = ac->data;
 
 	/*
 	 * Here, we know that redis itself will free this connection
@@ -307,13 +312,13 @@ rspamd_redis_pool_new_connection (struct rspamd_redis_pool *pool,
 			g_hash_table_insert (elt->pool->elts_by_ctx, ctx, conn);
 			g_queue_push_head_link (elt->active, conn->entry);
 			conn->ctx = ctx;
+			ctx->data = conn;
 			rspamd_random_hex (conn->tag, sizeof (conn->tag));
 			REF_INIT_RETAIN (conn, rspamd_redis_pool_conn_dtor);
 			msg_debug_rpool ("created new connection to %s:%d: %p", ip, port, ctx);
 
 			redisLibevAttach (pool->event_loop, ctx);
-			redisAsyncSetDisconnectCallback (ctx, rspamd_redis_pool_on_disconnect,
-					conn);
+			redisAsyncSetDisconnectCallback (ctx, rspamd_redis_pool_on_disconnect);
 
 			if (password) {
 				redisAsyncCommand (ctx, NULL, NULL,
@@ -395,11 +400,30 @@ rspamd_redis_pool_connect (struct rspamd_redis_pool *pool,
 			g_assert (conn->state != RSPAMD_REDIS_POOL_CONN_ACTIVE);
 
 			if (conn->ctx->err == REDIS_OK) {
-				ev_timer_stop (elt->pool->event_loop, &conn->timeout);
-				conn->state = RSPAMD_REDIS_POOL_CONN_ACTIVE;
-				g_queue_push_tail_link (elt->active, conn_entry);
-				msg_debug_rpool ("reused existing connection to %s:%d: %p",
-						ip, port, conn->ctx);
+				/* Also check SO_ERROR */
+				gint err;
+				socklen_t len = sizeof (gint);
+
+				if (getsockopt (conn->ctx->c.fd, SOL_SOCKET, SO_ERROR,
+						(void *) &err, &len) == -1) {
+					err = errno;
+				}
+
+				if (err != 0) {
+					g_list_free (conn->entry);
+					conn->entry = NULL;
+					REF_RELEASE (conn);
+					conn = rspamd_redis_pool_new_connection (pool, elt,
+							db, password, ip, port);
+				}
+				else {
+
+					ev_timer_stop (elt->pool->event_loop, &conn->timeout);
+					conn->state = RSPAMD_REDIS_POOL_CONN_ACTIVE;
+					g_queue_push_tail_link (elt->active, conn_entry);
+					msg_debug_rpool ("reused existing connection to %s:%d: %p",
+							ip, port, conn->ctx);
+				}
 			}
 			else {
 				g_list_free (conn->entry);

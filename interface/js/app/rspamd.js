@@ -26,10 +26,10 @@
 /* global jQuery:false, FooTable:false, Visibility:false */
 
 define(["jquery", "d3pie", "visibility", "nprogress", "stickytabs", "app/stats", "app/graph", "app/config",
-    "app/symbols", "app/history", "app/upload"],
+    "app/symbols", "app/history", "app/upload", "app/selectors"],
 // eslint-disable-next-line max-params
 function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_config,
-    tab_symbols, tab_history, tab_upload) {
+    tab_symbols, tab_history, tab_upload, tab_selectors) {
     "use strict";
     var ui = {
         page_size: {
@@ -91,26 +91,77 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         stopTimers();
 
         if (tab_id === "#refresh") {
-            tab_id = "#" + $(".navbar-nav .active > a").attr("id");
+            tab_id = "#" + $(".nav-link.active").attr("id");
+        }
+
+        $("#autoRefresh").hide();
+        $("#refresh").addClass("radius-right");
+
+        function setAutoRefresh(refreshInterval, timer, callback) {
+            function countdown(interval) {
+                Visibility.stop(timer_id.countdown);
+                if (!interval) {
+                    $("#countdown").text("--:--");
+                    return;
+                }
+
+                var timeLeft = interval;
+                $("#countdown").text("00:00");
+                timer_id.countdown = Visibility.every(1000, 1000, function () {
+                    timeLeft -= 1000;
+                    $("#countdown").text(new Date(timeLeft).toISOString().substr(14, 5));
+                    if (timeLeft <= 0) Visibility.stop(timer_id.countdown);
+                });
+            }
+
+            $("#refresh").removeClass("radius-right");
+            $("#autoRefresh").show();
+
+            countdown(refreshInterval);
+            if (!refreshInterval) return;
+            timer_id[timer] = Visibility.every(refreshInterval, function () {
+                countdown(refreshInterval);
+                callback();
+            });
+        }
+
+        if (["#scan_nav", "#selectors_nav", "#disconnect"].indexOf(tab_id) !== -1) {
+            $("#refresh").hide();
+        } else {
+            $("#refresh").show();
         }
 
         switch (tab_id) {
             case "#status_nav":
-                tab_stat.statWidgets(ui, graphs, checked_server);
-                timer_id.status = Visibility.every(10000, function () {
-                    tab_stat.statWidgets(ui, graphs, checked_server);
-                });
+                (function () {
+                    var refreshInterval = $(".dropdown-menu a.active.preset").data("value");
+                    setAutoRefresh(refreshInterval, "status",
+                        function () { return tab_stat.statWidgets(ui, graphs, checked_server); });
+                    if (refreshInterval) tab_stat.statWidgets(ui, graphs, checked_server);
+
+                    $(".preset").show();
+                    $(".dynamic").hide();
+                }());
                 break;
             case "#throughput_nav":
-                tab_graph.draw(ui, graphs, tables, neighbours, checked_server, selData);
+                (function () {
+                    var step = {
+                        day: 60000,
+                        week: 300000
+                    };
+                    var refreshInterval = step[selData] || 3600000;
+                    $("#dynamic-item").text((refreshInterval / 60000) + " min");
 
-                var autoRefresh = {
-                    day: 60000,
-                    week: 300000
-                };
-                timer_id.throughput = Visibility.every(autoRefresh[selData] || 3600000, function () {
-                    tab_graph.draw(ui, graphs, tables, neighbours, checked_server, selData);
-                });
+                    if (!$(".dropdown-menu a.active.dynamic").data("value")) {
+                        refreshInterval = null;
+                    }
+                    setAutoRefresh(refreshInterval, "throughput",
+                        function () { return tab_graph.draw(ui, graphs, tables, neighbours, checked_server, selData); });
+                    if (refreshInterval) tab_graph.draw(ui, graphs, tables, neighbours, checked_server, selData);
+
+                    $(".preset").hide();
+                    $(".dynamic").show();
+                }());
                 break;
             case "#configuration_nav":
                 tab_config.getActions(ui, checked_server);
@@ -215,6 +266,7 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                         $('#selSrv [value="' + e.name + '"]').prop("disabled", true);
                     }
                 });
+                tab_selectors.displayUI(ui);
             },
             errorMessage: "Cannot get server status",
             server: "All SERVERS"
@@ -224,16 +276,14 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         // So when we store the boolean true or false, it actually stores the strings "true" or "false".
         ui.read_only = sessionStorage.getItem("read_only") === "true";
         if (ui.read_only) {
-            $(".learn").hide();
-            $("#resetHistory").attr("disabled", true);
-            $("#errors-history").hide();
+            $(".ro-disable").attr("disabled", true);
+            $(".ro-hide").hide();
         } else {
-            $(".learn").show();
-            $("#resetHistory").removeAttr("disabled", true);
-            $("#errors-history").show();
+            $(".ro-disable").removeAttr("disabled", true);
+            $(".ro-hide").show();
         }
 
-        var buttons = $("#navBar .pull-right");
+        var buttons = $("#navbar-btn-form");
         $("#mainUI").show();
         $(buttons).show();
         $(".nav-tabs-sticky").stickyTabs({initialTab:"#status_nav"});
@@ -342,11 +392,11 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         });
 
         $(document).ajaxStart(function () {
-            $("#navBar").addClass("loading");
+            $("#refresh > svg").addClass("fa-spin");
         });
         $(document).ajaxComplete(function () {
             setTimeout(function () {
-                $("#navBar").removeClass("loading");
+                $("#refresh > svg").removeClass("fa-spin");
             }, 1000);
         });
 
@@ -358,11 +408,19 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
             var tab_id = "#" + $(e.target).attr("id");
             tabClick(tab_id);
         });
+        $(".dropdown-menu a").click(function (e) {
+            e.preventDefault();
+            var classList = $(this).attr("class");
+            var menuClass = (/\b(?:dynamic|preset)\b/).exec(classList)[0];
+            $(".dropdown-menu a.active." + menuClass).removeClass("active");
+            $(this).addClass("active");
+            tabClick("#refresh");
+        });
 
         $("#selSrv").change(function () {
             checked_server = this.value;
             $("#selSrv [value=\"" + checked_server + "\"]").prop("checked", true);
-            tabClick("#" + $("#navBar ul li.active > a").attr("id"));
+            tabClick("#" + $("#navBar > ul > .nav-item > .nav-link.active").attr("id"));
         });
 
         // Radio buttons
@@ -374,6 +432,7 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         });
         tab_config.setup(ui);
         tab_history.setup(ui, tables);
+        tab_selectors.setup(ui);
         tab_symbols.setup(ui, tables);
         tab_upload.setup(ui, tables);
         selData = tab_graph.setup(ui);
@@ -389,13 +448,12 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                 displayUI();
             },
             error: function () {
-                var dialog = $("#connectDialog");
-                var backdrop = $("#backDrop");
-                $("#mainUI").hide();
-                $(dialog).show();
-                $(backdrop).show();
-                $("#connectPassword").focus();
-                $("#connectForm").off("submit");
+                $("#connectDialog")
+                    .on("shown.bs.modal", function () {
+                        $("#connectDialog").off("shown.bs.modal");
+                        $("#connectPassword").focus();
+                    })
+                    .modal("show");
 
                 $("#connectForm").on("submit", function (e) {
                     e.preventDefault();
@@ -416,8 +474,8 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
                             if (data.auth === "ok") {
                                 sessionStorage.setItem("read_only", data.read_only);
                                 saveCredentials(password);
-                                $(dialog).hide();
-                                $(backdrop).hide();
+                                $("#connectForm").off("submit");
+                                $("#connectDialog").modal("hide");
                                 displayUI();
                             }
                         },
@@ -629,7 +687,7 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         $("#" + table + "_page_size").change(function () {
             set_page_size(table, this.value, function (n) { tables[table].pageSize(n); });
         });
-        $(document).on("click", ".btn-sym-order-" + table + " button", function () {
+        $(document).on("click", ".btn-sym-order-" + table + " input", function () {
             var order = this.value;
             $("#selSymOrder_" + table).val(order);
             change_symbols_order(order);
@@ -794,13 +852,13 @@ function ($, D3pie, visibility, NProgress, stickyTabs, tab_stat, tab_graph, tab_
         }
 
         if (item.action === "clean" || item.action === "no action") {
-            item.action = "<div style='font-size:11px' class='label label-success'>" + item.action + "</div>";
+            item.action = "<div style='font-size:11px' class='badge badge-success'>" + item.action + "</div>";
         } else if (item.action === "rewrite subject" || item.action === "add header" || item.action === "probable spam") {
-            item.action = "<div style='font-size:11px' class='label label-warning'>" + item.action + "</div>";
+            item.action = "<div style='font-size:11px' class='badge badge-warning'>" + item.action + "</div>";
         } else if (item.action === "spam" || item.action === "reject") {
-            item.action = "<div style='font-size:11px' class='label label-danger'>" + item.action + "</div>";
+            item.action = "<div style='font-size:11px' class='badge badge-danger'>" + item.action + "</div>";
         } else {
-            item.action = "<div style='font-size:11px' class='label label-info'>" + item.action + "</div>";
+            item.action = "<div style='font-size:11px' class='badge badge-info'>" + item.action + "</div>";
         }
 
         var score_content = (item.score < item.required_score)

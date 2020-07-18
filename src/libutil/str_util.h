@@ -143,22 +143,6 @@ gboolean rspamd_strtoul (const gchar *s, gsize len, gulong *value);
 gpointer rspamd_str_pool_copy (gconstpointer data, gpointer ud);
 
 /**
- * Encode string using base32 encoding
- * @param in input
- * @param inlen input length
- * @return freshly allocated base32 encoding of a specified string
- */
-gchar *rspamd_encode_base32 (const guchar *in, gsize inlen);
-
-/**
- * Decode string using base32 encoding
- * @param in input
- * @param inlen input length
- * @return freshly allocated base32 decoded value or NULL if input is invalid
- */
-guchar *rspamd_decode_base32 (const gchar *in, gsize inlen, gsize *outlen);
-
-/**
  * Encode string using hex encoding
  * @param in input
  * @param inlen input length
@@ -174,6 +158,38 @@ gchar *rspamd_encode_hex (const guchar *in, gsize inlen);
  */
 guchar *rspamd_decode_hex (const gchar *in, gsize inlen);
 
+enum rspamd_base32_type {
+	RSPAMD_BASE32_DEFAULT = 0,
+	RSPAMD_BASE32_ZBASE = 0,
+	RSPAMD_BASE32_BLEACH,
+	RSPAMD_BASE32_RFC,
+	RSPAMD_BASE32_INVALID = -1,
+};
+
+/**
+ * Returns base32 type from a string or RSPAMD_BASE32_INVALID
+ * @param str
+ * @return
+ */
+enum rspamd_base32_type rspamd_base32_decode_type_from_str (const gchar *str);
+
+/**
+ * Encode string using base32 encoding
+ * @param in input
+ * @param inlen input length
+ * @return freshly allocated base32 encoding of a specified string
+ */
+gchar *rspamd_encode_base32 (const guchar *in, gsize inlen,
+		enum rspamd_base32_type type);
+
+/**
+ * Decode string using base32 encoding
+ * @param in input
+ * @param inlen input length
+ * @return freshly allocated base32 decoded value or NULL if input is invalid
+ */
+guchar *rspamd_decode_base32 (const gchar *in, gsize inlen, gsize *outlen, enum rspamd_base32_type type);
+
 /**
  * Encode string using base32 encoding
  * @param in input
@@ -183,7 +199,7 @@ guchar *rspamd_decode_hex (const gchar *in, gsize inlen);
  * @return encoded len if `outlen` is enough to encode `inlen`
  */
 gint rspamd_encode_base32_buf (const guchar *in, gsize inlen, gchar *out,
-							   gsize outlen);
+		gsize outlen, enum rspamd_base32_type type);
 
 /**
  * Decode string using base32 encoding
@@ -193,8 +209,8 @@ gint rspamd_encode_base32_buf (const guchar *in, gsize inlen, gchar *out,
  * @param outlen output buf len
  * @return decoded len if in is valid base32 and `outlen` is enough to encode `inlen`
  */
-gint rspamd_decode_base32_buf (const gchar *in, gsize inlen,
-							   guchar *out, gsize outlen);
+gint rspamd_decode_base32_buf (const gchar *in, gsize inlen, guchar *out,
+		gsize outlen, enum rspamd_base32_type type);
 
 /**
  * Encode string using hex encoding
@@ -440,39 +456,7 @@ gsize rspamd_memspn (const gchar *s, const gchar *e, gsize len);
  */
 #define rspamd_is_aligned(p, n) (((uintptr_t)(p) & ((uintptr_t)(n) - 1)) == 0)
 #define rspamd_is_aligned_as(p, v) rspamd_is_aligned(p, _Alignof(__typeof((v))))
-
-static inline gboolean
-rspamd_str_has_8bit (const guchar *beg, gsize len)
-{
-	unsigned long *w;
-	gsize i, leftover;
-
-	if (rspamd_is_aligned_as (beg, *w)) {
-		leftover = len % sizeof (*w);
-		w = (unsigned long *) beg;
-
-		for (i = 0; i < len / sizeof (*w); i++) {
-			if (rspamd_str_hasmore (*w, 127)) {
-				return TRUE;
-			}
-
-			w++;
-		}
-
-		beg = (const guchar *) w;
-	}
-	else {
-		leftover = len;
-	}
-
-	for (i = 0; i < leftover; i++) {
-		if (beg[i] > 127) {
-			return TRUE;
-		}
-	}
-
-	return FALSE;
-}
+gboolean rspamd_str_has_8bit (const guchar *beg, gsize len);
 
 struct UConverter;
 

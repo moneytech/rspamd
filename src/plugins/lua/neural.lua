@@ -43,6 +43,7 @@ local default_options = {
     train_prob = 1.0,
     learn_threads = 1,
     learning_rate = 0.01,
+    classes_bias = 0.0, -- What difference is allowed between classes (1:1 proportion means 0 bias)
   },
   watch_interval = 60.0,
   lock_expire = 600,
@@ -99,15 +100,17 @@ end
 -- key2 - spam or ham
 -- key3 - maximum trains
 -- key4 - sampling coin (as Redis scripts do not allow math.random calls)
+-- key5 - classes bias
 -- returns 1 or 0 + reason: 1 - allow learn, 0 - not allow learn
 local redis_lua_script_can_store_train_vec = [[
   local prefix = KEYS[1]
   local locked = redis.call('HGET', prefix, 'lock')
-  if locked then return {tostring(-1),'locked by another process: ' .. locked} end
+  if locked then return {tostring(-1),'locked by another process till: ' .. locked} end
   local nspam = 0
   local nham = 0
   local lim = tonumber(KEYS[3])
   local coin = tonumber(KEYS[4])
+  local classes_bias = tonumber(KEYS[5])
 
   local ret = redis.call('LLEN', prefix .. '_spam')
   if ret then nspam = tonumber(ret) end
@@ -119,8 +122,8 @@ local redis_lua_script_can_store_train_vec = [[
       if nspam > nham then
         -- Apply sampling
         local skip_rate = 1.0 - nham / (nspam + 1)
-        if coin < skip_rate then
-          return {tostring(-(nspam)),'sampled out with probability ' .. tostring(skip_rate)}
+        if coin < skip_rate - classes_bias then
+          return {tostring(-(nspam)),'sampled out with probability ' .. tostring(skip_rate - classes_bias)}
         end
       end
       return {tostring(nspam),'can learn'}
@@ -132,8 +135,8 @@ local redis_lua_script_can_store_train_vec = [[
       if nham > nspam then
         -- Apply sampling
         local skip_rate = 1.0 - nspam / (nham + 1)
-        if coin < skip_rate then
-          return {tostring(-(nham)),'sampled out with probability ' .. tostring(skip_rate)}
+        if coin < skip_rate - classes_bias then
+          return {tostring(-(nham)),'sampled out with probability ' .. tostring(skip_rate - classes_bias)}
         end
       end
       return {tostring(nham),'can learn'}
@@ -200,6 +203,7 @@ local redis_maybe_lock_id = nil
 -- key4 - profile as JSON
 -- key5 - expire in seconds
 -- key6 - current time
+-- key7 - old key
 local redis_lua_script_save_unlock = [[
   local now = tonumber(KEYS[6])
   redis.call('ZADD', KEYS[2], now, KEYS[4])
@@ -207,6 +211,7 @@ local redis_lua_script_save_unlock = [[
   redis.call('DEL', KEYS[1] .. '_spam')
   redis.call('DEL', KEYS[1] .. '_ham')
   redis.call('HDEL', KEYS[1], 'lock')
+  redis.call('HDEL', KEYS[7], 'lock')
   redis.call('EXPIRE', KEYS[1], tonumber(KEYS[5]))
   return 1
 ]]
@@ -245,7 +250,7 @@ local function result_to_vector(task, profile)
     vec[i] = v
   end
 
-  task:process_ann_tokens(profile.symbols, vec, #mt)
+  task:process_ann_tokens(profile.symbols, vec, #mt, 0.1)
 
   return vec
 end
@@ -470,8 +475,8 @@ local function ann_push_task_result(rule, task, verdict, score, set)
           )
         else
           -- Negative result returned
-          rspamd_logger.infox(task, "cannot learn %s ANN %s:%s: %s (%s vectors stored)",
-              learn_type, rule.prefix, set.name, reason, -tonumber(nsamples))
+          rspamd_logger.infox(task, "cannot learn %s ANN %s:%s; redis_key: %s: %s (%s vectors stored)",
+              learn_type, rule.prefix, set.name, set.ann.redis_key, reason, -tonumber(nsamples))
         end
       else
         if err then
@@ -485,22 +490,34 @@ local function ann_push_task_result(rule, task, verdict, score, set)
       end
     end
 
-    if not set.ann then
-      -- Need to create or load a profile corresponding to the current configuration
-      set.ann = new_ann_profile(task, rule, set, 0)
-    end
     -- Check if we can learn
-    lua_redis.exec_redis_script(redis_can_store_train_vec_id,
-        {task = task, is_write = true},
-        can_train_cb,
-        {
-          set.ann.redis_key,
-          learn_type,
-          tostring(train_opts.max_trains),
-          tostring(math.random()),
-        })
+    if set.can_store_vectors then
+      if not set.ann then
+        -- Need to create or load a profile corresponding to the current configuration
+        set.ann = new_ann_profile(task, rule, set, 0)
+        lua_util.debugm(N, task,
+            'requested new profile for %s, set.ann is missing',
+            set.name)
+      end
+
+      lua_redis.exec_redis_script(redis_can_store_train_vec_id,
+          {task = task, is_write = true},
+          can_train_cb,
+          {
+            set.ann.redis_key,
+            learn_type,
+            tostring(train_opts.max_trains),
+            tostring(math.random()),
+            tostring(train_opts.classes_bias)
+          })
+    else
+      lua_util.debugm(N, task,
+          'do not push data: train condition not satisfied; reason: not checked existing ANNs')
+    end
   else
-    lua_util.debugm(N, task, 'do not push data: train condition not satisfied; reason: %s',
+    lua_util.debugm(N, task,
+        'do not push data to key %s: train condition not satisfied; reason: %s',
+        (set.ann or {}).redis_key,
         skip_reason)
   end
 end
@@ -719,6 +736,7 @@ local function spawn_train(worker, ev_base, rule, set, ann_key, ham_vec, spam_ve
              profile_serialized,
              tostring(rule.ann_expire),
              tostring(os.time()),
+             ann_key, -- old key to unlock...
             })
       end
     end
@@ -726,6 +744,7 @@ local function spawn_train(worker, ev_base, rule, set, ann_key, ham_vec, spam_ve
     worker:spawn_process{
       func = train,
       on_complete = ann_trained,
+      proctitle = string.format("ANN train for %s/%s", rule.prefix, set.name),
     }
   end
   -- Spawn learn and register lock extension
@@ -999,6 +1018,10 @@ end
 local function maybe_train_existing_ann(worker, ev_base, rule, set, profiles)
   local my_symbols = set.symbols
   local sel_elt
+  local lens = {
+    spam = 0,
+    ham = 0,
+  }
 
   for _,elt in fun.iter(profiles) do
     if elt and elt.symbols then
@@ -1025,21 +1048,36 @@ local function maybe_train_existing_ann(worker, ev_base, rule, set, profiles)
           rspamd_logger.errx(rspamd_config,
               'cannot get ANN %s trains %s from redis: %s', what, ann_key, err)
         elseif data and type(data) == 'number' or type(data) == 'string' then
-          if tonumber(data) and tonumber(data) >= rule.train.max_trains then
-            if is_final then
+          local ntrains = tonumber(data) or 0
+          lens[what] = ntrains
+          if is_final then
+            -- Ensure that we have the following:
+            -- one class has reached max_trains
+            -- other class(es) are at least as full as classes_bias
+            -- e.g. if classes_bias = 0.25 and we have 10 max_trains then
+            -- one class must have 10 or more trains whilst another should have
+            -- at least (10 * (1 - 0.25)) = 8 trains
+
+            local max_len = math.max(lua_util.unpack(lua_util.values(lens)))
+            local len_bias_check_pred = function(_, l)
+              return l >= rule.train.max_trains * (1.0 - rule.train.classes_bias)
+            end
+            if max_len >= rule.train.max_trains and fun.all(len_bias_check_pred, lens) then
               rspamd_logger.debugm(N, rspamd_config,
                   'can start ANN %s learn as it has %s learn vectors; %s required, after checking %s vectors',
-                  ann_key, tonumber(data), rule.train.max_trains, what)
+                  ann_key, lens, rule.train.max_trains, what)
+              cont_cb()
             else
               rspamd_logger.debugm(N, rspamd_config,
-                  'checked %s vectors in ANN %s: %s vectors; %s required, need to check other class vectors',
-                  what, ann_key, tonumber(data), rule.train.max_trains)
+                  'cannot learn ANN %s now: there are not enough %s learn vectors (has %s vectors; %s required)',
+                  ann_key, what, lens, rule.train.max_trains)
             end
-            cont_cb()
+
           else
             rspamd_logger.debugm(N, rspamd_config,
-                'cannot learn ANN %s now: there are not enough %s learn vectors (has %s vectors; %s required)',
-                ann_key, what, tonumber(data), rule.train.max_trains)
+                'checked %s vectors in ANN %s: %s vectors; %s required, need to check other class vectors',
+                what, ann_key, ntrains, rule.train.max_trains)
+            cont_cb()
           end
         end
       end
@@ -1049,7 +1087,7 @@ local function maybe_train_existing_ann(worker, ev_base, rule, set, profiles)
     local function initiate_train()
       rspamd_logger.infox(rspamd_config,
           'need to learn ANN %s after %s required learn vectors',
-          ann_key, rule.train.max_trains)
+          ann_key, lens)
       do_train_ann(worker, ev_base, rule, set, ann_key)
     end
 
@@ -1107,10 +1145,12 @@ local function check_anns(worker, cfg, ev_base, rule, process_callback, what)
       if err then
         rspamd_logger.errx(cfg, 'cannot get ANNs list from redis: %s',
             err)
+        set.can_store_vectors = true
       elseif type(data) == 'table' then
         lua_util.debugm(N, cfg, '%s: process element %s:%s',
             what, rule.prefix, set.name)
         process_callback(worker, ev_base, rule, set, fun.map(load_ann_profile, data))
+        set.can_store_vectors = true
       end
     end
 
@@ -1208,8 +1248,8 @@ local function process_rules_settings()
     if profile then
       -- Use static user defined profile
       -- Ensure that we have an array...
-      lua_util.debugm(N, rspamd_config, "use static profile for %s (%s)",
-          rule.prefix, selt.name)
+      lua_util.debugm(N, rspamd_config, "use static profile for %s (%s): %s",
+          rule.prefix, selt.name, profile)
       if not profile[1] then profile = lua_util.keys(profile) end
       selt.symbols = profile
     else
@@ -1236,10 +1276,32 @@ local function process_rules_settings()
 
     lua_redis.register_prefix(selt.prefix, N,
         string.format('NN prefix for rule "%s"; settings id "%s"',
-            rule.prefix, selt.name), {persistent = true})
+            rule.prefix, selt.name), {
+          persistent = true,
+          type = 'zlist',
+        })
+    -- Versions
+    lua_redis.register_prefix(selt.prefix .. '_\\d+', N,
+        string.format('NN storage for rule "%s"; settings id "%s"',
+            rule.prefix, selt.name), {
+          persistent = true,
+          type = 'hash',
+        })
+    lua_redis.register_prefix(selt.prefix .. '_\\d+_spam', N,
+        string.format('NN learning set (spam) for rule "%s"; settings id "%s"',
+            rule.prefix, selt.name), {
+          persistent = true,
+          type = 'list',
+        })
+    lua_redis.register_prefix(selt.prefix .. '_\\d+_ham', N,
+        string.format('NN learning set (spam) for rule "%s"; settings id "%s"',
+            rule.prefix, selt.name), {
+          persistent = true,
+          type = 'list',
+        })
   end
 
-  for _,rule in pairs(settings.rules) do
+  for k,rule in pairs(settings.rules) do
     if not rule.allowed_settings then
       rule.allowed_settings = {}
     elseif rule.allowed_settings == 'all' then
@@ -1251,7 +1313,7 @@ local function process_rules_settings()
     rule.allowed_settings = lua_util.list_to_hash(rule.allowed_settings)
 
     -- Check if we can work without settings
-    if type(rule.default) ~= 'boolean' then
+    if k == 'default' or type(rule.default) ~= 'boolean' then
       rule.default = true
     end
 
@@ -1271,7 +1333,11 @@ local function process_rules_settings()
     -- We set table rule.settings[id] -> { name = name, symbols = symbols, digest = digest }
     for s,_ in pairs(rule.allowed_settings) do
       -- Here, we have a name, set of symbols and
-      local selt = lua_settings.settings_by_id(s)
+      local settings_id = s
+      if type(settings_id) ~= 'number' then
+        settings_id = lua_settings.numeric_settings_id(s)
+      end
+      local selt = lua_settings.settings_by_id(settings_id)
 
       local nelt = {
         symbols = selt.symbols, -- Already sorted
@@ -1286,16 +1352,16 @@ local function process_rules_settings()
             lua_util.debugm(N, rspamd_config,
                 'added reference from settings id %s to %s; same symbols',
                 nelt.name, ex.name)
-            rule.settings[s] = id
+            rule.settings[settings_id] = id
             nelt = nil
           end
         end
       end
 
       if nelt then
-        rule.settings[s] = nelt
-        lua_util.debugm(N, rspamd_config, 'added new settings id %s to %s',
-            nelt.name, rule.prefix)
+        rule.settings[settings_id] = nelt
+        lua_util.debugm(N, rspamd_config, 'added new settings id %s(%s) to %s',
+            nelt.name, settings_id, rule.prefix)
       end
     end
   end
@@ -1324,7 +1390,8 @@ end
 
 local id = rspamd_config:register_symbol({
   name = 'NEURAL_CHECK',
-  type = 'postfilter,nostat',
+  type = 'postfilter,callback',
+  flags = 'nostat',
   priority = 6,
   callback = ann_scores_filter
 })
@@ -1344,7 +1411,7 @@ for k,r in pairs(rules) do
   if not rule_elt.name then
     rule_elt.name = k
   end
-  if rule_elt.train.max_train then
+  if rule_elt.train.max_train and not rule_elt.train.max_trains then
     rule_elt.train.max_trains = rule_elt.train.max_train
   end
 
@@ -1360,7 +1427,8 @@ for k,r in pairs(rules) do
   })
   rspamd_config:register_symbol({
     name = rule_elt.symbol_spam,
-    type = 'virtual,nostat',
+    type = 'virtual',
+    flags = 'nostat',
     parent = id
   })
 
@@ -1372,14 +1440,16 @@ for k,r in pairs(rules) do
   })
   rspamd_config:register_symbol({
     name = rule_elt.symbol_ham,
-    type = 'virtual,nostat',
+    type = 'virtual',
+    flags = 'nostat',
     parent = id
   })
 end
 
 rspamd_config:register_symbol({
   name = 'NEURAL_LEARN',
-  type = 'idempotent,nostat,explicit_disable',
+  type = 'idempotent,callback',
+  flags = 'nostat,explicit_disable',
   priority = 5,
   callback = ann_push_vector
 })

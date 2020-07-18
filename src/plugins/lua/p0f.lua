@@ -78,12 +78,17 @@ rule = p0f.configure(opts)
 if rule then
   rule.redis_params = lua_redis.parse_redis_server(N)
 
+  lua_redis.register_prefix(rule.prefix .. '*', N,
+      'P0f check cache', {
+        type = 'string',
+      })
+
   local id = rspamd_config:register_symbol({
     name = 'P0F_CHECK',
-    type = 'prefilter,nostat',
+    type = 'prefilter',
     callback = check_p0f,
     priority = 8,
-    flags = 'empty',
+    flags = 'empty,nostat',
     group = N
   })
 

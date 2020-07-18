@@ -95,8 +95,12 @@ local function apply_settings(task, to_apply, id)
   end
 end
 
--- Checks for overridden settings within query params and returns 'true' if
--- settings are overridden
+-- Checks for overridden settings within query params and returns 3 values:
+-- * Apply element
+-- * Settings ID element if found
+-- * Priority of the settings according to the place where it is found
+--
+-- If no override has been found, it returns `false`
 local function check_query_settings(task)
   -- Try 'settings' attribute
   local settings_id = task:get_settings_id()
@@ -111,9 +115,9 @@ local function check_query_settings(task)
             tostring(settings_id))
       end
       local settings_obj = parser:get_object()
-      apply_settings(task, settings_obj, nil)
 
-      return true
+      -- Treat as low priority
+      return settings_obj,nil,1
     else
       rspamd_logger.errx(task, 'Parse error: %s', err)
     end
@@ -145,8 +149,8 @@ local function check_query_settings(task)
 
       if not settings_id then
         rspamd_logger.infox(task, 'apply maxscore = %s', nset.actions)
-        apply_settings(task, nset, nil)
-        return true
+        -- Maxscore is low priority
+        return nset, nil, 1
       end
     end
   end
@@ -164,24 +168,19 @@ local function check_query_settings(task)
         if nset then
           elt.apply = lua_util.override_defaults(nset, elt.apply)
         end
-        apply_settings(task, elt['apply'], settings_id)
-        rspamd_logger.infox(task, "applied settings id %s(%s)",
-            cached.name, settings_id)
-        return true
+        return elt.apply, cached, cached.priority or 1
       end
     else
       rspamd_logger.warnx(task, 'no settings id "%s" has been found', settings_id)
       if nset then
         rspamd_logger.infox(task, 'apply maxscore = %s', nset.actions)
-        apply_settings(task, nset, nil)
-        return true
+        return nset, nil, 1
       end
     end
   else
     if nset then
       rspamd_logger.infox(task, 'apply maxscore = %s', nset.actions)
-      apply_settings(task, nset, nil)
-      return true
+      return nset, nil, 1
     end
   end
 
@@ -254,6 +253,18 @@ local function check_ip_setting(expected, ip)
   return false
 end
 
+local function priority_to_string(pri)
+  if pri then
+    if pri >= 3 then
+      return "high"
+    elseif pri >= 2 then
+      return "medium"
+    end
+  end
+
+  return "low"
+end
+
 -- Check limit for a task
 local function check_settings(task)
   local function check_specific_setting(rule, matched)
@@ -291,19 +302,47 @@ local function check_settings(task)
   end
 
   -- Check if we have override as query argument
-  if check_query_settings(task) then
-    return
+  local query_apply,id_elt,priority = check_query_settings(task)
+
+  local function maybe_apply_query_settings()
+    if query_apply then
+      if id_elt then
+        apply_settings(task, query_apply, id_elt.id)
+        rspamd_logger.infox(task, "applied settings id %s(%s); priority %s",
+            id_elt.name, id_elt.id, priority_to_string(priority))
+      else
+        apply_settings(task, query_apply, nil)
+        rspamd_logger.infox(task, "applied settings from query; priority %s",
+            priority_to_string(priority))
+      end
+    end
+  end
+
+  local min_pri = 1
+  if query_apply then
+    if priority >= min_pri then
+      -- Do not check lower or equal priorities
+      min_pri = priority + 1
+    end
+
+    if priority > max_pri then
+      -- Our internal priorities are lower then a priority from query, so no need to check
+      maybe_apply_query_settings()
+
+      return
+    end
   end
 
   -- Do not waste resources
   if not settings_initialized then
+    maybe_apply_query_settings()
     return
   end
 
   -- Match rules according their order
   local applied = false
 
-  for pri = max_pri,1,-1 do
+  for pri = max_pri,min_pri,-1 do
     if not applied and settings[pri] then
       for _,s in ipairs(settings[pri]) do
         local matched = {}
@@ -321,10 +360,11 @@ local function check_settings(task)
               if not cached or not cached.settings or not cached.settings.apply then
                 rspamd_logger.errx(task, 'unregistered settings id found: %s!', s.rule.id)
               else
-                rspamd_logger.infox(task, "<%s> apply static settings %s (id = %s); %s matched",
+                rspamd_logger.infox(task, "<%s> apply static settings %s (id = %s); %s matched; priority %s",
                     task:get_message_id(),
                     cached.name, s.rule.id,
-                    table.concat(matched, ','))
+                    table.concat(matched, ','),
+                    priority_to_string(pri))
                 apply_settings(task, cached.settings.apply, s.rule.id)
               end
 
@@ -346,6 +386,10 @@ local function check_settings(task)
         end
       end
     end
+  end
+
+  if not applied then
+    maybe_apply_query_settings()
   end
 
 end
@@ -992,9 +1036,16 @@ end
 
 -- Parse settings map from the ucl line
 local settings_map_pool
-local function process_settings_map(string)
+local function process_settings_map(map_text)
   local parser = ucl.parser()
-  local res,err = parser:parse_string(string)
+  local res,err
+
+  if type(map_text) == 'string' then
+    res,err = parser:parse_string(map_text)
+  else
+    res,err = parser:parse_text(map_text)
+  end
+
   if not res then
     rspamd_logger.warnx(rspamd_config, 'cannot parse settings map: ' .. err)
   else
@@ -1098,10 +1149,10 @@ if redis_section then
   fun.each(function(id, h)
     rspamd_config:register_symbol({
       name = 'REDIS_SETTINGS' .. tostring(id),
-      type = 'prefilter,nostat',
+      type = 'prefilter',
       callback = gen_redis_callback(h, id),
       priority = 10,
-      flags = 'empty',
+      flags = 'empty,nostat',
     })
   end, redis_key_handlers)
 end
@@ -1118,7 +1169,13 @@ local set_section = rspamd_config:get_all_opt("settings")
 
 if set_section and set_section[1] and type(set_section[1]) == "string" then
   -- Just a map of ucl
-  if not rspamd_config:add_map(set_section[1], "settings map", process_settings_map) then
+  local map_attrs = {
+    url = set_section[1],
+    description = "settings map",
+    callback = process_settings_map,
+    opaque_data = true
+  }
+  if not rspamd_config:add_map(map_attrs) then
     rspamd_logger.errx(rspamd_config, 'cannot load settings from %1', set_section)
   end
 elseif set_section and type(set_section) == "table" then

@@ -1,3 +1,131 @@
+2.5: 01 Apr 2020
+  * [Conf] Mark Rspamd emailbl as ignore whitelist
+  * [Conf] RBL: Add missing emails = true option
+  * [Feature] Add support for scripts in fuzzy storage
+  * [Feature] Arc: Add whitelisted_signers_map option
+  * [Feature] Implement hosts file processing
+  * [Feature] Neural: Introduce classes bias that allows non-equal classes learning
+  * [Feature] Update libev to 4.33
+  * [Fix] Another brain damage html standard adoptions
+  * [Fix] Another fix for brain damaged obs-fws state
+  * [Fix] Fix flags that caused force_actions failure
+  * [Fix] Fix logging issue
+  * [Fix] Fix lua symbols scores registration when config does not define scores
+  * [Fix] Fix opaque maps logic
+  * [Fix] Fix parsing of the html tags with no spaces after attributes
+  * [Fix] Fix some corner cases in urls parsing, add limits
+  * [Fix] Fix tlds extraction if custom composition rules are used
+  * [Fix] Fix variables replacement in mempool
+  * [Fix] Improve base64 detection
+  * [Fix] Normalize dynamic scores in ANN correctly
+  * [Fix] Plug memory leak introduced by #3153
+  * [Fix] Stat_redis_backend: Fix memory leak and simplify learn path
+  * [Fix] Try hard to deal with ghost workers
+  * [Fix] metadata_exporter default formatter
+  * [Rework] Change the way to extract URLs when dealing with alternative parts
+  * [Rework] Fix various url extraction issues
+  * [Rework] Re cache: Load compiled hyperscan in the main process as well
+  * [Rework] Re cache: Load hyperscan early
+  * [Rework] Rework URL structure: adjust tld part
+  * [Rework] Rework URL structure: host field
+  * [Rework] Rework URL structure: more structure optimisations
+  * [Rework] Rework URL structure: user field
+  * [Rework] URL: Another update for urls extraction logic
+  * [Rework] Urls: Improve query urls handling
+  * [Rework] Urls: adopt html related stuff
+  * [Rework] Urls: more rework of the urls sets
+  * [Rework] Urls: process query urls in HTML urls correctly
+  * [Rework] Urls: rework urls hash structure
+  * [Rework] Urls: update lua libraries
+  * [Rework] Use multiple search tries for different url extraction types
+
+2.4: 26 Feb 2020
+  * [CritFix] Fix parsing of the content type attributes
+  * [Feature] Clickhouse: Add extra columns support
+  * [Feature] Rbl: Add url_compose_map option for RBL rules
+  * [Fix] 'R' flag is for all headers regexp
+  * [Fix] Allow to reset settings id from Lua (e.g. because of the priority)
+  * [Fix] Avoid collisions in mempool variables by changing fuzzy caching logic
+  * [Fix] Avoid strdup usage for symbols options
+  * [Fix] Do not trust stat(2) it lies
+  * [Fix] Filter all options for symbols to have sane characters
+  * [Fix] Fix all headers iteration
+  * [Fix] Fix allowed_settings for neural
+  * [Fix] Fix listen socket parsing
+  * [Fix] Fix maps expressions evaluation
+  * [Fix] Fix sentinel connections leak by using async connections
+  * [Fix] Fix smtp message on passthrough result
+  * [Fix] Fix tld compositon rules
+  * [Fix] Fuzzy_storage: Do not check for shingles if a direct hash has been found
+  * [Fix] Lua_mime: Do not perform QP encoding for 7bit parts
+  * [Fix] Neural: Distinguish missing symbols from symbols with low scores
+  * [Fix] Support listening on systemd sockets by name
+  * [Project] Add lua_urls_compose library
+  * [Project] Allow to set a custom log function to the logger
+  * [Project] CDB maps: Start making cdb a first class citizen
+  * [Project] Clickhouse: Add extra columns concept
+  * [Project] Fix urls composition rules, add unit tests
+  * [Project] Unify cdb maps
+  * [Rework] Logger infrastructure rework
+  * [Rework] Refactor libraries structure
+  * [Rework] Rework SSL caching
+  * [Rework] Update snowball stemmer to 2.0 and remove all crap aside of UTF8
+
+2.3: 04 Feb 2020
+  * [Conf] SPF is no longer a C module
+  * [Conf] Update spamtrap map path example
+  * [CritFix] Fix html entities decoding
+  * [CritFix] Fix re cache when mix of pcre and hyperscan is used
+  * [Feature] Allow milter code to deal with multiple headers
+  * [Feature] Antivirus: Add avast support
+  * [Feature] Dkim_signing: Allow to sign via milter_headers
+  * [Feature] Implement content hashes
+  * [Feature] Lua_text: Add regexp split iterator method
+  * [Feature] Lua_text: Implement flattening of the input tables
+  * [Feature] Send quit command to Redis
+  * [Feature] Speed up is_ascii function
+  * [Feature] Spf: Add external_relay option
+  * [Fix] Avoid double escaping
+  * [Fix] Fix O(N^2) algorithm
+  * [Fix] Fix arc seal validation
+  * [Fix] Fix base tag processing according to stupid HTML renderer behaviour
+  * [Fix] Fix dealing with `\0` in ucl strings and JSON
+  * [Fix] Fix gpg parts misdetection
+  * [Fix] Fix ignored symbols exporting
+  * [Fix] Fix processing of numeric url's
+  * [Fix] Fix processing of the closed tcp connections
+  * [Fix] Fix regexp type check for pcre2
+  * [Fix] Fix urls encode function
+  * [Fix] Fix urls shifting when doing decode to include separators
+  * [Fix] Fix white on white rule and add is_leaf flag
+  * [Fix] Further fixes in charset detection
+  * [Fix] Ignore diacritics in chartable module for specific languages
+  * [Fix] Limit size of symbols options by max_opts_len option
+  * [Fix] More fixes in html tag content calculations
+  * [Fix] Plug memory leak in fuzzy storage
+  * [Fix] Process high priority settings even if settings/id has been specified
+  * [Fix] Select a different upstream on last retransmit
+  * [Fix] Treat soft hyphen as zero width space
+  * [Fix] Try harder to watch the lifetime of the key_stat
+  * [Fix] Use ipv6-mapped-ipv4 addresses in radix trie
+  * [Project] Add logic to break execution when processing symbols*
+  * [Project] Add methods to set specific content for mime parts from Lua
+  * [Project] Lua_content: support PDF files
+  * [Project] Move dns_tool to using of the rspamd_spf from FFI module
+  * [Project] Preliminary SPF plugin in Lua
+  * [Project] Show debug stat for memory pool
+  * [Project] Some rework about specific data that is now tagged
+  * [Project] Start reworking of the mempool structure
+  * [Rework] Allow to add userdata as symbols options
+  * [Rework] Change mime part specifics handling
+  * [Rework] Move LRU SPF cache from spf plugin
+  * [Rework] Rework HTML tags content attachment
+  * [Rework] Rework options hash structure
+  * [Rework] Start lua_content library
+  * [Rework] Stop using of uthash for http headers
+  * [Rework] Use faster hashing approach for memory pools variables
+  * [Rules] Add PDF related rules
+
 2.2: 19 Nov 2019
   * [Conf] Antivirus: Fix the default config
   * [Feature] Add verdict library in lua

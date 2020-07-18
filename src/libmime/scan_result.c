@@ -43,6 +43,10 @@ rspamd_scan_result_dtor (gpointer d)
 
 	rspamd_set_counter_ema (&symbols_count, kh_size (r->symbols), 0.5);
 
+	if (r->symbol_cbref != -1) {
+		luaL_unref (r->task->cfg->lua_state, LUA_REGISTRYINDEX, r->symbol_cbref);
+	}
+
 	kh_foreach_value (r->symbols, sres, {
 		if (sres.options) {
 			kh_destroy (rspamd_options_hash, sres.options);
@@ -53,21 +57,26 @@ rspamd_scan_result_dtor (gpointer d)
 }
 
 struct rspamd_scan_result *
-rspamd_create_metric_result (struct rspamd_task *task)
+rspamd_create_metric_result (struct rspamd_task *task,
+							 const gchar *name, gint lua_sym_cbref)
 {
 	struct rspamd_scan_result *metric_res;
 	guint i;
-
-	metric_res = task->result;
-
-	if (metric_res != NULL) {
-		return metric_res;
-	}
 
 	metric_res = rspamd_mempool_alloc0 (task->task_pool,
 			sizeof (struct rspamd_scan_result));
 	metric_res->symbols = kh_init (rspamd_symbols_hash);
 	metric_res->sym_groups = kh_init (rspamd_symbols_group_hash);
+
+	if (name) {
+		metric_res->name = rspamd_mempool_strdup (task->task_pool, name);
+	}
+	else {
+		metric_res->name = NULL;
+	}
+
+	metric_res->symbol_cbref = lua_sym_cbref;
+	metric_res->task = task;
 
 	/* Optimize allocation */
 	kh_resize (rspamd_symbols_group_hash, metric_res->sym_groups, 4);
@@ -101,6 +110,7 @@ rspamd_create_metric_result (struct rspamd_task *task)
 	rspamd_mempool_add_destructor (task->task_pool,
 			rspamd_scan_result_dtor,
 			metric_res);
+	DL_APPEND (task->result, metric_res);
 
 	return metric_res;
 }
@@ -113,18 +123,15 @@ rspamd_pr_sort (const struct rspamd_passthrough_result *pra,
 }
 
 void
-rspamd_add_passthrough_result (struct rspamd_task *task,
-									struct rspamd_action *action,
-									guint priority,
-									double target_score,
-									const gchar *message,
-									const gchar *module,
-									guint flags)
+rspamd_add_passthrough_result (struct rspamd_task *task, struct rspamd_action *action, guint priority,
+							   double target_score, const gchar *message, const gchar *module, guint flags,
+							   struct rspamd_scan_result *scan_result)
 {
-	struct rspamd_scan_result *metric_res;
 	struct rspamd_passthrough_result *pr;
 
-	metric_res = task->result;
+	if (scan_result == NULL) {
+		scan_result = task->result;
+	}
 
 	pr = rspamd_mempool_alloc (task->task_pool, sizeof (*pr));
 	pr->action = action;
@@ -134,8 +141,8 @@ rspamd_add_passthrough_result (struct rspamd_task *task,
 	pr->target_score = target_score;
 	pr->flags = flags;
 
-	DL_APPEND (metric_res->passthrough_result, pr);
-	DL_SORT (metric_res->passthrough_result, rspamd_pr_sort);
+	DL_APPEND (scan_result->passthrough_result, pr);
+	DL_SORT (scan_result->passthrough_result, rspamd_pr_sort);
 
 	if (!isnan (target_score)) {
 
@@ -181,12 +188,12 @@ rspamd_check_group_score (struct rspamd_task *task,
 
 static struct rspamd_symbol_result *
 insert_metric_result (struct rspamd_task *task,
-		const gchar *symbol,
-		double weight,
-		const gchar *opt,
-		enum rspamd_symbol_insert_flags flags)
+					  const gchar *symbol,
+					  double weight,
+					  const gchar *opt,
+					  struct rspamd_scan_result *metric_res,
+					  enum rspamd_symbol_insert_flags flags)
 {
-	struct rspamd_scan_result *metric_res;
 	struct rspamd_symbol_result *s = NULL;
 	gdouble final_score, *gr_score = NULL, next_gf = 1.0, diff;
 	struct rspamd_symbol *sdef;
@@ -197,8 +204,6 @@ insert_metric_result (struct rspamd_task *task,
 	khiter_t k;
 	gboolean single = !!(flags & RSPAMD_SYMBOL_INSERT_SINGLE);
 	gchar *sym_cpy;
-
-	metric_res = task->result;
 
 	if (!isfinite (weight)) {
 		msg_warn_task ("detected %s score for symbol %s, replace it with zero",
@@ -293,7 +298,7 @@ insert_metric_result (struct rspamd_task *task,
 		s->nshots ++;
 
 		if (opt) {
-			rspamd_task_add_result_option (task, s, opt);
+			rspamd_task_add_result_option (task, s, opt, strlen (opt));
 		}
 
 		/* Adjust diff */
@@ -459,7 +464,9 @@ insert_metric_result (struct rspamd_task *task,
 			s->score = 0;
 		}
 
-		rspamd_task_add_result_option (task, s, opt);
+		if (opt) {
+			rspamd_task_add_result_option (task, s, opt, strlen (opt));
+		}
 	}
 
 	msg_debug_metric ("final insertion for symbol %s, score %.2f, factor: %f",
@@ -472,12 +479,14 @@ insert_metric_result (struct rspamd_task *task,
 
 struct rspamd_symbol_result *
 rspamd_task_insert_result_full (struct rspamd_task *task,
-		const gchar *symbol,
-		double weight,
-		const gchar *opt,
-		enum rspamd_symbol_insert_flags flags)
+								const gchar *symbol,
+								double weight,
+								const gchar *opt,
+								enum rspamd_symbol_insert_flags flags,
+								struct rspamd_scan_result *result)
 {
-	struct rspamd_symbol_result *s = NULL;
+	struct rspamd_symbol_result *s = NULL, *ret = NULL;
+	struct rspamd_scan_result *mres;
 
 	if (task->processed_stages & (RSPAMD_TASK_STAGE_IDEMPOTENT >> 1)) {
 		msg_err_task ("cannot insert symbol %s on idempotent phase",
@@ -486,29 +495,184 @@ rspamd_task_insert_result_full (struct rspamd_task *task,
 		return NULL;
 	}
 
-	/* Insert symbol to default metric */
-	s = insert_metric_result (task,
-			symbol,
-			weight,
-			opt,
-			flags);
+	if (result == NULL) {
+		/* Insert everywhere */
+		DL_FOREACH (task->result, mres) {
+			if (mres->symbol_cbref != -1) {
+				/* Check if we can insert this symbol to this symbol result */
+				GError *err = NULL;
+				lua_State *L = (lua_State *) task->cfg->lua_state;
 
-	/* Process cache item */
-	if (s && task->cfg->cache && s->sym) {
-		rspamd_symcache_inc_frequency (task->cfg->cache, s->sym->cache_item);
+				if (!rspamd_lua_universal_pcall (L, mres->symbol_cbref,
+						G_STRLOC, 1, "uss", &err,
+						"rspamd{task}", task, symbol, mres->name ? mres->name : "default")) {
+					msg_warn_task ("cannot call for symbol_cbref for result %s: %e",
+							mres->name ? mres->name : "default", err);
+					g_error_free (err);
+
+					continue;
+				}
+				else {
+					if (!lua_toboolean (L, -1)) {
+						/* Skip symbol */
+						msg_debug_metric ("skip symbol %s for result %s due to Lua return value",
+								symbol, mres->name);
+						lua_pop (L, 1); /* Remove result */
+
+						continue;
+					}
+
+					lua_pop (L, 1); /* Remove result */
+				}
+			}
+
+			s = insert_metric_result (task,
+					symbol,
+					weight,
+					opt,
+					mres,
+					flags);
+
+			if (mres->name == NULL) {
+				/* Default result */
+				ret = s;
+
+				/* Process cache item */
+				if (s && task->cfg->cache && s->sym) {
+					rspamd_symcache_inc_frequency (task->cfg->cache,
+							s->sym->cache_item);
+				}
+			}
+		}
+	}
+	else {
+		/* Specific insertion */
+		s = insert_metric_result (task,
+				symbol,
+				weight,
+				opt,
+				result,
+				flags);
+		ret = s;
+
+		if (result->name == NULL) {
+			/* Process cache item */
+			if (s && task->cfg->cache && s->sym) {
+				rspamd_symcache_inc_frequency (task->cfg->cache,
+						s->sym->cache_item);
+			}
+		}
 	}
 
-	return s;
+	return ret;
+}
+
+static gchar *
+rspamd_task_option_safe_copy (struct rspamd_task *task,
+							  const gchar *val,
+							  gsize vlen,
+							  gsize *outlen)
+{
+	const gchar *p, *end;
+
+	p = val;
+	end = val + vlen;
+	vlen = 0; /* Reuse */
+
+	while (p < end) {
+		if (*p & 0x80) {
+			UChar32 uc;
+			gint off = 0;
+
+			U8_NEXT (p, off, end - p, uc);
+
+			if (uc > 0) {
+				if (u_isprint (uc)) {
+					vlen += off;
+				}
+				else {
+					/* We will replace it with 0xFFFD */
+					vlen += MAX (off, 3);
+				}
+			}
+			else {
+				vlen += MAX (off, 3);
+			}
+
+			p += off;
+		}
+		else if (!g_ascii_isprint (*p)) {
+			/* Another 0xFFFD */
+			vlen += 3;
+			p ++;
+		}
+		else {
+			p ++;
+			vlen ++;
+		}
+	}
+
+	gchar *dest, *d;
+
+	dest = rspamd_mempool_alloc (task->task_pool, vlen + 1);
+	d = dest;
+	p = val;
+
+	while (p < end) {
+		if (*p & 0x80) {
+			UChar32 uc;
+			gint off = 0;
+
+			U8_NEXT (p, off, end - p, uc);
+
+			if (uc > 0) {
+				if (u_isprint (uc)) {
+					memcpy (d, p, off);
+					d += off;
+				}
+				else {
+					/* We will replace it with 0xFFFD */
+					*d++ = '\357';
+					*d++ = '\277';
+					*d++ = '\275';
+				}
+			}
+			else {
+				*d++ = '\357';
+				*d++ = '\277';
+				*d++ = '\275';
+			}
+
+			p += off;
+		}
+		else if (!g_ascii_isprint (*p)) {
+			/* Another 0xFFFD */
+			*d++ = '\357';
+			*d++ = '\277';
+			*d++ = '\275';
+			p ++;
+		}
+		else {
+			*d++ = *p++;
+		}
+	}
+
+	*d = '\0';
+	*(outlen) = d - dest;
+
+	return dest;
 }
 
 gboolean
 rspamd_task_add_result_option (struct rspamd_task *task,
-		struct rspamd_symbol_result *s, const gchar *val)
+							   struct rspamd_symbol_result *s,
+							   const gchar *val,
+							   gsize vlen)
 {
-	struct rspamd_symbol_option *opt;
+	struct rspamd_symbol_option *opt, srch;
 	gboolean ret = FALSE;
 	gchar *opt_cpy = NULL;
-	gsize vlen;
+	gsize cpy_len;
 	khiter_t k;
 	gint r;
 
@@ -524,8 +688,6 @@ rspamd_task_add_result_option (struct rspamd_task *task,
 			s->options = kh_init (rspamd_options_hash);
 		}
 
-		vlen = strlen (val);
-
 		if (vlen + s->opts_len > task->cfg->max_opts_len) {
 			/* Add truncated option */
 			msg_info_task ("cannot add more options to symbol %s when adding option %s",
@@ -535,28 +697,20 @@ rspamd_task_add_result_option (struct rspamd_task *task,
 			s->opts_len = -1;
 		}
 
-		if (rspamd_fast_utf8_validate (val, vlen) != 0) {
-			opt_cpy = rspamd_str_make_utf_valid (val, vlen, &vlen,
-					task->task_pool);
-			val = opt_cpy;
-		}
-
 		if (!(s->sym && (s->sym->flags & RSPAMD_SYMBOL_FLAG_ONEPARAM)) &&
 				kh_size (s->options) < task->cfg->default_max_shots) {
+			opt_cpy = rspamd_task_option_safe_copy (task, val, vlen, &cpy_len);
 			/* Append new options */
-			k = kh_get (rspamd_options_hash, s->options, val);
+			srch.option = (gchar *)opt_cpy;
+			srch.optlen = cpy_len;
+			k = kh_get (rspamd_options_hash, s->options, &srch);
 
 			if (k == kh_end (s->options)) {
 				opt = rspamd_mempool_alloc0 (task->task_pool, sizeof (*opt));
-
-				if (opt_cpy == NULL) {
-					opt_cpy = rspamd_mempool_strdup (task->task_pool, val);
-				}
-
-				k = kh_put (rspamd_options_hash, s->options, opt_cpy, &r);
-
-				kh_value (s->options, k) = opt;
+				opt->optlen = cpy_len;
 				opt->option = opt_cpy;
+
+				kh_put (rspamd_options_hash, s->options, opt, &r);
 				DL_APPEND (s->opts_head, opt);
 
 				ret = TRUE;
@@ -578,20 +732,25 @@ rspamd_task_add_result_option (struct rspamd_task *task,
 	return ret;
 }
 
-struct rspamd_action*
-rspamd_check_action_metric (struct rspamd_task *task)
+struct rspamd_action *
+rspamd_check_action_metric (struct rspamd_task *task,
+							struct rspamd_passthrough_result **ppr,
+							struct rspamd_scan_result *scan_result)
 {
 	struct rspamd_action_result *action_lim,
 			*noaction = NULL;
 	struct rspamd_action *selected_action = NULL, *least_action = NULL;
-	struct rspamd_passthrough_result *pr;
+	struct rspamd_passthrough_result *pr, *sel_pr = NULL;
 	double max_score = -(G_MAXDOUBLE), sc;
 	int i;
-	struct rspamd_scan_result *mres = task->result;
 	gboolean seen_least = FALSE;
 
-	if (mres->passthrough_result != NULL)  {
-		DL_FOREACH (mres->passthrough_result, pr) {
+	if (scan_result == NULL) {
+		scan_result = task->result;
+	}
+
+	if (scan_result->passthrough_result != NULL)  {
+		DL_FOREACH (scan_result->passthrough_result, pr) {
 			if (!seen_least || !(pr->flags & RSPAMD_PASSTHROUGH_LEAST)) {
 				sc = pr->target_score;
 				selected_action = pr->action;
@@ -599,11 +758,15 @@ rspamd_check_action_metric (struct rspamd_task *task)
 				if (!(pr->flags & RSPAMD_PASSTHROUGH_LEAST)) {
 					if (!isnan (sc)) {
 						if (pr->action->action_type == METRIC_ACTION_NOACTION) {
-							mres->score = MIN (sc, mres->score);
+							scan_result->score = MIN (sc, scan_result->score);
 						}
 						else {
-							mres->score = sc;
+							scan_result->score = sc;
 						}
+					}
+
+					if (ppr) {
+						*ppr = pr;
 					}
 
 					return selected_action;
@@ -631,22 +794,23 @@ rspamd_check_action_metric (struct rspamd_task *task)
 						else {
 							sc = selected_action->threshold;
 							max_score = sc;
+							sel_pr = pr;
 						}
 					}
 					else {
 						max_score = sc;
+						sel_pr = pr;
 					}
 				}
 			}
 		}
 	}
-	/* We are not certain about the results during processing */
 
 	/*
 	 * Select result by score
 	 */
-	for (i = mres->nactions - 1; i >= 0; i--) {
-		action_lim = &mres->actions_limits[i];
+	for (i = scan_result->nactions - 1; i >= 0; i--) {
+		action_lim = &scan_result->actions_limits[i];
 		sc = action_lim->cur_limit;
 
 		if (action_lim->action->action_type == METRIC_ACTION_NOACTION) {
@@ -658,7 +822,7 @@ rspamd_check_action_metric (struct rspamd_task *task)
 			continue;
 		}
 
-		if (mres->score >= sc && sc > max_score) {
+		if (scan_result->score >= sc && sc > max_score) {
 			selected_action = action_lim->action;
 			max_score = sc;
 		}
@@ -671,39 +835,56 @@ rspamd_check_action_metric (struct rspamd_task *task)
 	if (selected_action) {
 
 		if (seen_least) {
-
+			/* Adjust least action */
 			if (least_action->flags & RSPAMD_ACTION_NO_THRESHOLD) {
 				if (selected_action->action_type != METRIC_ACTION_REJECT &&
 						selected_action->action_type != METRIC_ACTION_DISCARD) {
 					/* Override score based action with least action */
 					selected_action = least_action;
+
+					if (ppr) {
+						*ppr = sel_pr;
+					}
 				}
 			}
 			else {
 				/* Adjust score if needed */
-				mres->score = MAX (max_score, mres->score);
+				if (max_score > scan_result->score) {
+					if (ppr) {
+						*ppr = sel_pr;
+					}
+
+					scan_result->score = max_score;
+				}
 			}
 		}
 
 		return selected_action;
 	}
 
+	if (ppr) {
+		*ppr = sel_pr;
+	}
+
 	return noaction->action;
 }
 
-struct rspamd_symbol_result*
-rspamd_task_find_symbol_result (struct rspamd_task *task, const char *sym)
+struct rspamd_symbol_result *
+rspamd_task_find_symbol_result (struct rspamd_task *task, const char *sym,
+		struct rspamd_scan_result *result)
 {
 	struct rspamd_symbol_result *res = NULL;
 	khiter_t k;
 
+	if (result == NULL) {
+		/* Use default result */
+		result = task->result;
+	}
 
-	if (task->result) {
-		k = kh_get (rspamd_symbols_hash, task->result->symbols, sym);
+	k = kh_get (rspamd_symbols_hash, result->symbols, sym);
 
-		if (k != kh_end (task->result->symbols)) {
-			res = &kh_value (task->result->symbols, k);
-		}
+	if (k != kh_end (result->symbols)) {
+		res = &kh_value (result->symbols, k);
 	}
 
 	return res;
@@ -711,15 +892,42 @@ rspamd_task_find_symbol_result (struct rspamd_task *task, const char *sym)
 
 void
 rspamd_task_symbol_result_foreach (struct rspamd_task *task,
-										GHFunc func,
-										gpointer ud)
+								   struct rspamd_scan_result *result, GHFunc func,
+								   gpointer ud)
 {
 	const gchar *kk;
 	struct rspamd_symbol_result res;
 
-	if (func && task->result) {
-		kh_foreach (task->result->symbols, kk, res, {
+	if (result == NULL) {
+		/* Use default result */
+		result = task->result;
+	}
+
+	if (func) {
+		kh_foreach (result->symbols, kk, res, {
 			func ((gpointer)kk, (gpointer)&res, ud);
 		});
 	}
+}
+
+struct rspamd_scan_result *
+rspamd_find_metric_result (struct rspamd_task *task,
+						   const gchar *name)
+{
+	struct rspamd_scan_result *res;
+
+	if (name == NULL) {
+		return task->result;
+	}
+	else if (strcmp (name, "default") == 0) {
+		return task->result;
+	}
+
+	DL_FOREACH (task->result, res) {
+		if (res->name && strcmp (res->name, name) == 0) {
+			return res;
+		}
+	}
+
+	return NULL;
 }

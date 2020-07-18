@@ -19,6 +19,7 @@
 #include "ref.h"
 #include "util.h"
 #include "rspamd.h"
+#include "contrib/fastutf8/fastutf8.h"
 
 #ifndef WITH_PCRE2
 /* Normal pcre path */
@@ -199,7 +200,7 @@ rspamd_regexp_post_process (rspamd_regexp_t *r)
 		pcre2_jit_stack_assign (r->mcontext, NULL, global_re_cache->jstack);
 	}
 
-	if (r->re != r->raw_re && !(r->flags & RSPAMD_REGEXP_FLAG_DISABLE_JIT)) {
+	if (r->raw_re && r->re != r->raw_re && !(r->flags & RSPAMD_REGEXP_FLAG_DISABLE_JIT)) {
 		if (pcre2_jit_compile (r->raw_re, jit_flags) < 0) {
 			msg_debug ("jit compilation of %s is not supported", r->pattern);
 			r->flags |= RSPAMD_REGEXP_FLAG_DISABLE_JIT;
@@ -209,6 +210,7 @@ rspamd_regexp_post_process (rspamd_regexp_t *r)
 			msg_debug ("jit compilation of raw %s is not supported", r->pattern);
 		}
 		else if (!(r->flags & RSPAMD_REGEXP_FLAG_DISABLE_JIT)) {
+			g_assert (r->raw_mcontext != NULL);
 			pcre2_jit_stack_assign (r->raw_mcontext, NULL, global_re_cache->jstack);
 		}
 	}
@@ -575,11 +577,11 @@ rspamd_regexp_search (rspamd_regexp_t *re, const gchar *text, gsize len,
 		r = re->re;
 		ext = re->extra;
 #if defined(HAVE_PCRE_JIT) && defined(HAVE_PCRE_JIT_FAST) && !defined(DISABLE_JIT_FAST)
-		if (g_utf8_validate (mt, remain, NULL)) {
+		if (rspamd_fast_utf8_validate (mt, remain) == 0) {
 			st = global_re_cache->jstack;
 		}
 		else {
-			msg_err ("bad utf8 input for JIT re");
+			msg_err ("bad utf8 input for JIT re '%s'", re->pattern);
 			return FALSE;
 		}
 #endif
@@ -630,7 +632,7 @@ rspamd_regexp_search (rspamd_regexp_t *re, const gchar *text, gsize len,
 			*end = mt + ovec[1];
 		}
 
-		if (captures != NULL && rc > 1) {
+		if (captures != NULL && rc >= 1) {
 			struct rspamd_re_capture *elt;
 
 			g_assert (g_array_get_element_size (captures) ==
@@ -707,12 +709,17 @@ rspamd_regexp_search (rspamd_regexp_t *re, const gchar *text, gsize len,
 		mcontext = re->mcontext;
 	}
 
+	if (r == NULL) {
+		/* Invalid regexp type for the specified input */
+		return FALSE;
+	}
+
 	match_data = pcre2_match_data_create (re->ncaptures + 1, NULL);
 
 #ifdef HAVE_PCRE_JIT
 	if (!(re->flags & RSPAMD_REGEXP_FLAG_DISABLE_JIT) && can_jit) {
-		if (re->re != re->raw_re && !g_utf8_validate (mt, remain, NULL)) {
-			msg_err ("bad utf8 input for JIT re");
+		if (re->re != re->raw_re && rspamd_fast_utf8_validate (mt, remain) != 0) {
+			msg_err ("bad utf8 input for JIT re '%s'", re->pattern);
 			return FALSE;
 		}
 
@@ -739,7 +746,7 @@ rspamd_regexp_search (rspamd_regexp_t *re, const gchar *text, gsize len,
 			*end = mt + ovec[1];
 		}
 
-		if (captures != NULL && novec > 1) {
+		if (captures != NULL && novec >= 1) {
 			struct rspamd_re_capture *elt;
 
 			g_assert (g_array_get_element_size (captures) ==

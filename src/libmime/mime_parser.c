@@ -199,7 +199,8 @@ rspamd_mime_part_get_cte_heuristic (struct rspamd_task *task,
 		struct rspamd_mime_part *part)
 {
 	const guint check_len = 128;
-	guint real_len, nspaces = 0, neqsign = 0, n8bit = 0, nqpencoded = 0;
+	guint real_len, nspaces = 0, neqsign = 0, n8bit = 0, nqpencoded = 0,
+		padeqsign = 0, nupper = 0, nlower = 0;
 	gboolean b64_chars = TRUE;
 	const guchar *p, *end;
 	enum rspamd_cte ret = RSPAMD_CTE_UNKNOWN;
@@ -239,18 +240,24 @@ rspamd_mime_part_get_cte_heuristic (struct rspamd_task *task,
 		}
 	}
 
+	/* Skip trailing spaces */
+	while (end > p && g_ascii_isspace (*(end - 1))) {
+		end --;
+	}
+
 	if (end > p + 2) {
 		if (*(end - 1) == '=') {
-			neqsign ++;
+			padeqsign ++;
 			end --;
 		}
 
 		if (*(end - 1) == '=') {
-			neqsign ++;
+			padeqsign ++;
 			end --;
 		}
 	}
 
+	/* Adjust end to analyse only first characters */
 	if (end - p > real_len) {
 		end = p + real_len;
 	}
@@ -260,6 +267,7 @@ rspamd_mime_part_get_cte_heuristic (struct rspamd_task *task,
 			nspaces ++;
 		}
 		else if (*p == '=') {
+			b64_chars = FALSE; /* Eqsign must not be inside base64 */
 			neqsign ++;
 			p ++;
 
@@ -277,12 +285,74 @@ rspamd_mime_part_get_cte_heuristic (struct rspamd_task *task,
 		else if (!(g_ascii_isalnum (*p) || *p == '/' || *p == '+')) {
 			b64_chars = FALSE;
 		}
+		else if (g_ascii_isupper (*p)) {
+			nupper ++;
+		}
+		else if (g_ascii_islower (*p)) {
+			nlower ++;
+		}
 
 		p ++;
 	}
 
-	if (b64_chars && neqsign < 2 && nspaces == 0) {
-		ret = RSPAMD_CTE_B64;
+	if (b64_chars && neqsign <= 2 && nspaces == 0) {
+		/* Need more thinking */
+
+		if (part->raw_data.len > 80) {
+			if (padeqsign > 0) {
+				ret = RSPAMD_CTE_B64;
+			}
+			else {
+				/* We have a large piece of data with no spaces and base64
+				 * symbols only, no padding is detected as well...
+				 *
+				 * There is a small chance that our first 128 characters
+				 * are either some garbage or it is a base64 with no padding
+				 * (e.g. when it is not needed)
+				 */
+				if (nupper > 1 && nlower > 1) {
+					/*
+					 * We have both uppercase and lowercase letters, so it can be
+					 * base64
+					 */
+					ret = RSPAMD_CTE_B64;
+				}
+				else {
+					ret = RSPAMD_CTE_7BIT;
+				}
+			}
+		}
+		else {
+
+			if (((end - (const guchar *)part->raw_data.begin) + padeqsign) % 4 == 0) {
+				if (padeqsign == 0) {
+					/*
+					 * It can be either base64 or plain text, hard to say
+					 * Let's assume that if we have > 1 uppercase it is
+					 * likely base64
+					 */
+					if (nupper > 1 && nlower > 1) {
+						ret = RSPAMD_CTE_B64;
+					}
+					else {
+						ret = RSPAMD_CTE_7BIT;
+					}
+
+				}
+				else {
+					ret = RSPAMD_CTE_B64;
+				}
+			}
+			else {
+				/* No way */
+				if (padeqsign == 1 || padeqsign == 2) {
+					ret = RSPAMD_CTE_B64;
+				}
+				else {
+					ret = RSPAMD_CTE_7BIT;
+				}
+			}
+		}
 	}
 	else if (n8bit == 0) {
 		if (neqsign > 2 && nqpencoded > 2) {
@@ -297,6 +367,7 @@ rspamd_mime_part_get_cte_heuristic (struct rspamd_task *task,
 	}
 
 	msg_debug_mime ("detected cte: %s", rspamd_cte_to_string (ret));
+
 	return ret;
 }
 
@@ -611,7 +682,8 @@ rspamd_mime_parse_normal_part (struct rspamd_task *task,
 		g_assert_not_reached ();
 	}
 
-	part->id = MESSAGE_FIELD (task, parts)->len;
+	part->part_number = MESSAGE_FIELD (task, parts)->len;
+	part->urls = g_ptr_array_new ();
 	g_ptr_array_add (MESSAGE_FIELD (task, parts), part);
 	msg_debug_mime ("parsed data part %T/%T of length %z (%z orig), %s cte",
 			&part->ct->type, &part->ct->subtype, part->parsed_data.len,
@@ -707,6 +779,11 @@ rspamd_mime_process_multipart_node (struct rspamd_task *task,
 					npart->raw_headers_str,
 					npart->raw_headers_len,
 					FALSE);
+
+			/* Preserve the natural order */
+			if (npart->headers_order) {
+				LL_REVERSE2 (npart->headers_order, ord_next);
+			}
 		}
 
 		hdr = rspamd_message_get_header_from_hash (npart->raw_headers,
@@ -940,7 +1017,8 @@ rspamd_mime_parse_multipart_part (struct rspamd_task *task,
 		return RSPAMD_MIME_PARSE_NESTING;
 	}
 
-	part->id = MESSAGE_FIELD (task, parts)->len;
+	part->part_number = MESSAGE_FIELD (task, parts)->len;
+	part->urls = g_ptr_array_new ();
 	g_ptr_array_add (MESSAGE_FIELD (task, parts), part);
 	st->nesting ++;
 	rspamd_mime_part_get_cte (task, part->raw_headers, part, FALSE);
@@ -1000,7 +1078,7 @@ rspamd_mime_preprocess_cb (struct rspamd_multipattern *mp,
 		blen = 0;
 
 		while (p < end) {
-			if (*p == '\r' || *p == '\n') {
+			if (g_ascii_isspace (*p)) {
 				break;
 			}
 			else if (*p != '-') {
@@ -1032,19 +1110,26 @@ rspamd_mime_preprocess_cb (struct rspamd_multipattern *mp,
 				bend ++;
 			}
 
-			if (bend < end) {
+			while (bend < end) {
 				if (*bend == '\r') {
-					bend++;
+					bend ++;
 
 					/* \r\n */
 					if (bend < end && *bend == '\n') {
-						bend++;
+						bend ++;
 					}
 				}
-				else {
+				else if (*bend == '\n') {
 					/* \n */
-					bend++;
+					bend ++;
 				}
+				else if (g_ascii_isspace (*bend)){
+					/* Spaces in the same line, skip them */
+					bend ++;
+					continue;
+				}
+
+				break;
 			}
 
 			b.boundary = p - st->start - 2;
@@ -1216,34 +1301,6 @@ rspamd_mime_parse_message (struct rspamd_task *task,
 		/* Top level message */
 		p = task->msg.begin;
 		len = task->msg.len;
-		/* Skip any space characters to avoid some bad messages to be unparsed */
-		while (len > 0 && g_ascii_isspace (*p)) {
-			p ++;
-			len --;
-		}
-		/*
-		 * Exim somehow uses mailbox format for messages being scanned:
-		 * From x@x.com Fri May 13 19:08:48 2016
-		 *
-		 * Need to check that for all inputs due to proxy
-		 */
-		if (len > sizeof ("From ") - 1) {
-			if (memcmp (p, "From ", sizeof ("From ") - 1) == 0) {
-				/* Skip to CRLF */
-				msg_info_task ("mailbox input detected, enable workaround");
-				p += sizeof ("From ") - 1;
-				len -= sizeof ("From ") - 1;
-
-				while (len > 0 && *p != '\n') {
-					p ++;
-					len --;
-				}
-				while (len > 0 && g_ascii_isspace (*p)) {
-					p ++;
-					len --;
-				}
-			}
-		}
 
 		str.str = (gchar *)p;
 		str.len = len;
@@ -1265,6 +1322,11 @@ rspamd_mime_parse_message (struct rspamd_task *task,
 						TRUE);
 				npart->raw_headers = rspamd_message_headers_ref (
 						MESSAGE_FIELD (task, raw_headers));
+
+				/* Preserve the natural order */
+				if (MESSAGE_FIELD (task, headers_order)) {
+					LL_REVERSE2 (MESSAGE_FIELD (task, headers_order), ord_next);
+				}
 			}
 
 			hdr = rspamd_message_get_header_from_hash (
@@ -1290,6 +1352,11 @@ rspamd_mime_parse_message (struct rspamd_task *task,
 							TRUE);
 					npart->raw_headers = rspamd_message_headers_ref (
 							MESSAGE_FIELD (task, raw_headers));
+
+					/* Preserve the natural order */
+					if (MESSAGE_FIELD (task, headers_order)) {
+						LL_REVERSE2 (MESSAGE_FIELD (task, headers_order), ord_next);
+					}
 				}
 
 				hdr = rspamd_message_get_header_from_hash (
@@ -1341,6 +1408,11 @@ rspamd_mime_parse_message (struct rspamd_task *task,
 						npart->raw_headers_str,
 						npart->raw_headers_len,
 						FALSE);
+
+				/* Preserve the natural order */
+				if (npart->headers_order) {
+					LL_REVERSE2 (npart->headers_order, ord_next);
+				}
 			}
 
 			hdr = rspamd_message_get_header_from_hash (npart->raw_headers,

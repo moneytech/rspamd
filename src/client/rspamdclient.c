@@ -15,8 +15,8 @@
  */
 #include "rspamdclient.h"
 #include "libutil/util.h"
-#include "libutil/http_connection.h"
-#include "libutil/http_private.h"
+#include "libserver/http/http_connection.h"
+#include "libserver/http/http_private.h"
 #include "libserver/protocol_internal.h"
 #include "unix-std.h"
 #include "contrib/zstd/zstd.h"
@@ -264,6 +264,7 @@ rspamd_client_init (struct rspamd_http_context *http_ctx,
 	gint fd;
 
 	fd = rspamd_socket (name, port, SOCK_STREAM, TRUE, FALSE, TRUE);
+
 	if (fd == -1) {
 		return NULL;
 	}
@@ -279,7 +280,15 @@ rspamd_client_init (struct rspamd_http_context *http_ctx,
 			0,
 			fd);
 
+	if (!conn->http_conn) {
+		rspamd_client_destroy (conn);
+		return NULL;
+	}
+
+	/* Pass socket ownership */
+	rspamd_http_connection_own_socket (conn->http_conn);
 	conn->server_name = g_string_new (name);
+
 	if (port != 0) {
 		rspamd_printf_gstring (conn->server_name, ":%d", (int)port);
 	}
@@ -474,17 +483,22 @@ void
 rspamd_client_destroy (struct rspamd_client_connection *conn)
 {
 	if (conn != NULL) {
-		rspamd_http_connection_unref (conn->http_conn);
+		if (conn->http_conn) {
+			rspamd_http_connection_unref (conn->http_conn);
+		}
+
 		if (conn->req != NULL) {
 			rspamd_client_request_free (conn->req);
 		}
-		close (conn->fd);
+
 		if (conn->key) {
 			rspamd_pubkey_unref (conn->key);
 		}
+
 		if (conn->keypair) {
 			rspamd_keypair_unref (conn->keypair);
 		}
+
 		g_string_free (conn->server_name, TRUE);
 		g_free (conn);
 	}

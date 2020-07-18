@@ -22,10 +22,10 @@
  THE SOFTWARE.
  */
 
-/* global FooTable:false */
+/* global d3:false FooTable:false */
 
-define(["jquery", "footable", "humanize"],
-    function ($, _, Humanize) {
+define(["jquery", "footable"],
+    function ($) {
         "use strict";
         var ui = {};
         var prevVersion = null;
@@ -138,10 +138,13 @@ define(["jquery", "footable", "humanize"],
                 name: "symbols",
                 title: "Symbols<br /><br />" +
                         '<span style="font-weight:normal;">Sort by:</span><br />' +
-                        '<div class="btn-group btn-group-xs btn-sym-order-history" data-toggle="buttons">' +
-                            '<button type="button" class="btn btn-default btn-sym-history-magnitude" value="magnitude">Magnitude</button>' +
-                            '<button type="button" class="btn btn-default btn-sym-history-score" value="score">Value</button>' +
-                            '<button type="button" class="btn btn-default btn-sym-history-name" value="name">Name</button>' +
+                        '<div class="btn-group btn-group-toggle btn-group-xs btn-sym-order-history" data-toggle="buttons">' +
+                            '<label type="button" class="btn btn-outline-secondary btn-sym-history-magnitude">' +
+                                '<input type="radio" value="magnitude">Magnitude</label>' +
+                            '<label type="button" class="btn btn-outline-secondary btn-sym-history-score">' +
+                                '<input type="radio" value="score">Value</label>' +
+                            '<label type="button" class="btn btn-outline-secondary btn-sym-history-name">' +
+                                '<input type="radio" value="name">Name</label>' +
                         "</div>",
                 breakpoints: "all",
                 style: {
@@ -157,7 +160,7 @@ define(["jquery", "footable", "humanize"],
                     "font-size": "11px",
                     "minwidth": 50,
                 },
-                formatter: Humanize.compactInteger
+                formatter: d3.format(".3~s")
             }, {
                 name: "time_real",
                 title: "Scan time",
@@ -245,7 +248,7 @@ define(["jquery", "footable", "humanize"],
                     "width": 120,
                     "maxWidth": 120
                 },
-                formatter: Humanize.compactInteger
+                formatter: d3.format(".3~s")
             }, {
                 name: "scan_time",
                 title: "Scan time",

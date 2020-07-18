@@ -17,11 +17,11 @@
 #include "libserver/dynamic_cfg.h"
 #include "libserver/cfg_file_private.h"
 #include "libutil/rrd.h"
-#include "libutil/map.h"
-#include "libutil/map_helpers.h"
-#include "libutil/map_private.h"
-#include "libutil/http_private.h"
-#include "libutil/http_router.h"
+#include "libserver/maps/map.h"
+#include "libserver/maps/map_helpers.h"
+#include "libserver/maps/map_private.h"
+#include "libserver/http/http_private.h"
+#include "libserver/http/http_router.h"
 #include "libstat/stat_api.h"
 #include "rspamd.h"
 #include "libserver/worker_util.h"
@@ -325,7 +325,7 @@ check_uncached:
 	if (salt != NULL && hash != NULL) {
 
 		/* decode salt */
-		salt_decoded = rspamd_decode_base32 (salt, salt_len, &salt_len);
+		salt_decoded = rspamd_decode_base32 (salt, salt_len, &salt_len, RSPAMD_BASE32_DEFAULT);
 
 		if (salt_decoded == NULL || salt_len != pbkdf->salt_len) {
 			/* We have some unknown salt here */
@@ -334,7 +334,7 @@ check_uncached:
 			return FALSE;
 		}
 
-		key_decoded = rspamd_decode_base32 (hash, key_len, &key_len);
+		key_decoded = rspamd_decode_base32 (hash, key_len, &key_len, RSPAMD_BASE32_DEFAULT);
 
 		if (key_decoded == NULL || key_len != pbkdf->key_len) {
 			/* We have some unknown salt here */
@@ -563,13 +563,15 @@ rspamd_controller_check_password (struct rspamd_http_connection_entry *entry,
 			}
 		}
 
-		msg_info_session ("absent password has been specified");
+		msg_info_session ("absent password has been specified; source ip: %s",
+				rspamd_inet_address_to_string_pretty (session->from_addr));
 		ret = FALSE;
 	}
 	else {
 		if (rspamd_ftok_cstr_equal (password, "q1", FALSE) ||
 				rspamd_ftok_cstr_equal (password, "q2", FALSE)) {
-			msg_info_session ("deny default password for remote access");
+			msg_info_session ("deny default password for remote access; source ip: %s",
+					rspamd_inet_address_to_string_pretty (session->from_addr));
 			ret = FALSE;
 			goto end;
 		}
@@ -603,7 +605,8 @@ rspamd_controller_check_password (struct rspamd_http_connection_entry *entry,
 			}
 			else {
 				msg_warn_session (
-						"no password to check while executing a privileged command");
+						"no password to check while executing a privileged command; source ip: %s",
+						rspamd_inet_address_to_string_pretty (session->from_addr));
 				ret = FALSE;
 			}
 
@@ -673,7 +676,8 @@ rspamd_controller_check_password (struct rspamd_http_connection_entry *entry,
 	}
 
 	if (check_normal == FALSE && check_enable == FALSE) {
-		msg_info ("absent or incorrect password has been specified");
+		msg_info ("absent or incorrect password has been specified; source ip: %s",
+				rspamd_inet_address_to_string_pretty (session->from_addr));
 		ret = FALSE;
 	}
 
@@ -2863,7 +2867,8 @@ rspamd_controller_handle_plugins (struct rspamd_http_connection_entry *conn_ent,
 		}
 
 		g_assert (npath != NULL);
-		ucl_array_append (npath, ucl_object_fromstring (k));
+		rspamd_ftok_t *key_tok = (rspamd_ftok_t *)k;
+		ucl_array_append (npath, ucl_object_fromlstring (key_tok->begin, key_tok->len));
 	}
 
 	rspamd_controller_send_ucl (conn_ent, plugins);
@@ -2959,14 +2964,31 @@ rspamd_controller_handle_lua_plugin (struct rspamd_http_connection_entry *conn_e
 	struct rspamd_http_connection_entry **pconn;
 	struct rspamd_controller_worker_ctx *ctx;
 	lua_State *L;
-	gchar *url_str;
+	struct http_parser_url u;
+	rspamd_ftok_t lookup;
 
-	url_str = rspamd_fstring_cstr (msg->url);
-	cbd = g_hash_table_lookup (session->ctx->plugins, url_str);
-	g_free (url_str);
+
+	http_parser_parse_url (msg->url->str, msg->url->len, TRUE, &u);
+
+	if (u.field_set & (1 << UF_PATH)) {
+		guint unnorm_len;
+		lookup.begin = msg->url->str + u.field_data[UF_PATH].off;
+		lookup.len = u.field_data[UF_PATH].len;
+
+		rspamd_http_normalize_path_inplace ((gchar *)lookup.begin,
+				lookup.len,
+				&unnorm_len);
+		lookup.len = unnorm_len;
+	}
+	else {
+		lookup.begin = msg->url->str;
+		lookup.len = msg->url->len;
+	}
+
+	cbd = g_hash_table_lookup (session->ctx->plugins, &lookup);
 
 	if (cbd == NULL || cbd->handler == NULL) {
-		msg_err_session ("plugin handler %V has not been found", msg->url);
+		msg_err_session ("plugin handler %T has not been found", &lookup);
 		rspamd_controller_send_error (conn_ent, 404, "No command associated");
 		return 0;
 	}
@@ -3011,15 +3033,38 @@ rspamd_controller_handle_lua_plugin (struct rspamd_http_connection_entry *conn_e
 	/* Callback */
 	lua_rawgeti (L, LUA_REGISTRYINDEX, cbd->handler->idx);
 
+	/* Task */
 	ptask = lua_newuserdata (L, sizeof (*ptask));
 	rspamd_lua_setclass (L, "rspamd{task}", -1);
 	*ptask = task;
 
+	/* Connection */
 	pconn = lua_newuserdata (L, sizeof (*pconn));
 	rspamd_lua_setclass (L, "rspamd{csession}", -1);
 	*pconn = conn_ent;
 
-	if (lua_pcall (L, 2, 0, 0) != 0) {
+	/* Query arguments */
+	GHashTable *params;
+	GHashTableIter it;
+	gpointer k, v;
+
+	params = rspamd_http_message_parse_query (msg);
+	lua_createtable (L, g_hash_table_size (params), 0);
+	g_hash_table_iter_init (&it, params);
+
+	while (g_hash_table_iter_next (&it, &k, &v)) {
+		rspamd_ftok_t *key_tok = (rspamd_ftok_t *)k,
+			*value_tok = (rspamd_ftok_t *)v;
+
+		lua_pushlstring (L, key_tok->begin, key_tok->len);
+		/* TODO: consider rspamd_text here */
+		lua_pushlstring (L, value_tok->begin, value_tok->len);
+		lua_settable (L, -3);
+	}
+
+	g_hash_table_unref (params);
+
+	if (lua_pcall (L, 3, 0, 0) != 0) {
 		rspamd_controller_send_error (conn_ent, 503, "Cannot run callback: %s",
 				lua_tostring (L, -1));
 		lua_settop (L, 0);
@@ -3391,7 +3436,7 @@ rspamd_controller_register_plugin_path (lua_State *L,
 {
 	struct rspamd_controller_plugin_cbdata *cbd;
 	const ucl_object_t *elt;
-	GString *full_path;
+	rspamd_fstring_t *full_path;
 
 	cbd = g_malloc0 (sizeof (*cbd));
 	cbd->L = L;
@@ -3418,15 +3463,18 @@ rspamd_controller_register_plugin_path (lua_State *L,
 		cbd->need_task = TRUE;
 	}
 
-	full_path = g_string_new ("/plugins/");
-	rspamd_printf_gstring (full_path, "%s/%s",
-			plugin_name, path);
+	full_path = rspamd_fstring_new_init ("/plugins/", sizeof ("/plugins/") - 1);
+	/* Zero terminated */
+	rspamd_printf_fstring (&full_path, "%s/%s%c",
+			plugin_name, path, '\0');
 
 	rspamd_http_router_add_path (ctx->http,
 			full_path->str,
 			rspamd_controller_handle_lua_plugin);
-	g_hash_table_insert (ctx->plugins, full_path->str, cbd);
-	g_string_free (full_path, FALSE); /* Do not free data */
+	rspamd_ftok_t *key_tok = rspamd_ftok_map (full_path);
+	/* Truncate stupid \0 symbol to enable lookup */
+	key_tok->len --;
+	g_hash_table_insert (ctx->plugins, key_tok, cbd);
 }
 
 static void
@@ -3477,6 +3525,7 @@ rspamd_controller_register_plugins_paths (struct rspamd_controller_worker_ctx *c
 /*
  * Start worker process
  */
+__attribute__((noreturn))
 void
 start_controller_worker (struct rspamd_worker *worker)
 {
@@ -3498,9 +3547,9 @@ start_controller_worker (struct rspamd_worker *worker)
 	ctx->srv = worker->srv;
 	ctx->custom_commands = g_hash_table_new (rspamd_strcase_hash,
 			rspamd_strcase_equal);
-	ctx->plugins = g_hash_table_new_full (rspamd_strcase_hash,
-				rspamd_strcase_equal, g_free,
-				rspamd_plugin_cbdata_dtor);
+	ctx->plugins = g_hash_table_new_full (rspamd_ftok_icase_hash,
+			rspamd_ftok_icase_equal, rspamd_fstring_mapped_ftok_free,
+			rspamd_plugin_cbdata_dtor);
 
 	if (isnan (ctx->task_timeout)) {
 		if (isnan (ctx->cfg->task_timeout)) {
@@ -3641,6 +3690,10 @@ start_controller_worker (struct rspamd_worker *worker)
 				"Access-Control-Allow-Origin", "*");
 	}
 
+	/* Disable all results caching, see #3330 */
+	rspamd_http_router_add_header (ctx->http,
+			"Cache-Control", "no-store");
+
 	rspamd_http_router_set_unknown_handler (ctx->http,
 			rspamd_controller_handle_unknown);
 
@@ -3685,7 +3738,7 @@ start_controller_worker (struct rspamd_worker *worker)
 	g_hash_table_unref (ctx->custom_commands);
 
 	REF_RELEASE (ctx->cfg);
-	rspamd_log_close (worker->srv->logger, TRUE);
+	rspamd_log_close (worker->srv->logger);
 
 	exit (EXIT_SUCCESS);
 }

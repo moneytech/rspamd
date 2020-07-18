@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 #include "lua_common.h"
-#include "libutil/map.h"
-#include "libutil/map_private.h"
+#include "libserver/maps/map.h"
+#include "libserver/maps/map_private.h"
 
 /***
  * @module rspamd_logger
@@ -463,7 +463,7 @@ lua_logger_out_table (lua_State *L, gint pos, gchar *outbuf, gsize len,
 	gsize remain = len, r;
 	gboolean first = TRUE;
 	gconstpointer self = NULL;
-	gint i, tpos;
+	gint i, tpos, last_seq = -1;
 
 	if (!lua_istable (L, pos) || remain == 0) {
 		return 0;
@@ -498,6 +498,8 @@ lua_logger_out_table (lua_State *L, gint pos, gchar *outbuf, gsize len,
 			break;
 		}
 
+		last_seq = i;
+
 		if (!first) {
 			r = rspamd_snprintf (d, remain + 1, ", ");
 			MOVE_BUF(d, remain, r);
@@ -524,7 +526,17 @@ lua_logger_out_table (lua_State *L, gint pos, gchar *outbuf, gsize len,
 		/* 'key' is at index -2 and 'value' is at index -1 */
 
 		if (lua_type (L, -2) == LUA_TNUMBER) {
-			continue;
+			if (last_seq > 0) {
+				lua_pushvalue (L, -2);
+
+				if (lua_tonumber (L, -1) <= last_seq + 1) {
+					lua_pop (L, 1);
+					/* Already seen */
+					continue;
+				}
+
+				lua_pop (L, 1);
+			}
 		}
 
 		if (!first) {
@@ -532,8 +544,11 @@ lua_logger_out_table (lua_State *L, gint pos, gchar *outbuf, gsize len,
 			MOVE_BUF(d, remain, r);
 		}
 
+		/* Preserve key */
+		lua_pushvalue (L, -2);
 		r = rspamd_snprintf (d, remain + 1, "[%s] = ",
-				lua_tostring (L, -2));
+				lua_tostring (L, -1));
+		lua_pop (L, 1); /* Remove key */
 		MOVE_BUF(d, remain, r);
 		tpos = lua_gettop (L);
 
@@ -934,8 +949,11 @@ lua_logger_logx (lua_State *L)
 	if (lua_type (L, 3) == LUA_TSTRING) {
 		uid = luaL_checkstring (L, 3);
 	}
-	else {
+	else if (lua_type (L, 3) == LUA_TUSERDATA) {
 		uid = lua_logger_get_id (L, 3, NULL);
+	}
+	else {
+		uid = "???";
 	}
 
 	if (uid && modname) {

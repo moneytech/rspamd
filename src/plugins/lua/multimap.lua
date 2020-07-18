@@ -439,27 +439,7 @@ local function multimap_callback(task, rule)
 
     local ret = false
 
-    if r['cdb'] then
-      if type(r.cdb) == 'string' then
-        local rspamd_cdb = require "rspamd_cdb"
-        local cdb = rspamd_cdb.create(r.cdb, task:get_ev_base())
-
-        if not cdb then
-          rspamd_logger.infox(task, 'cannot open cdb file %s', r.cdb)
-
-          return false
-        else
-          r.cdb = cdb
-        end
-      end
-      local srch = value
-      if type(value) == 'userdata' then
-        if value.class == 'rspamd{ip}' then
-          srch = value:tostring()
-        end
-      end
-      ret = r.cdb:lookup(srch)
-    elseif r.redis_key then
+    if r.redis_key then
       -- Deal with hash name here: it can be either plain string or a selector
       if type(r.redis_key) == 'string' then
         ret = multimap_query_redis(r.redis_key, task, value, callback)
@@ -897,7 +877,7 @@ local function multimap_callback(task, rule)
 
       for _,p in fun.iter(fun.filter(filter_parts, parts)) do
         if filter_archive(p) then
-          local fnames = p:get_archive():get_files()
+          local fnames = p:get_archive():get_files(1000)
 
           for _,fn in ipairs(fnames) do
             match_filename(rule, fn)
@@ -1094,11 +1074,7 @@ local function add_multimap_rule(key, newrule)
       newrule.selector = selector
     end
   end
-  -- Check cdb flag
-  if type(newrule['map']) == 'string' and string.find(newrule['map'], '^cdb://.*$') then
-    newrule['cdb'] = newrule['map']
-    ret = true
-  elseif type(newrule['map']) == 'string' and
+  if type(newrule['map']) == 'string' and
       string.find(newrule['map'], '^redis://.*$') then
     if not redis_params then
       rspamd_logger.infox(rspamd_config, 'no redis servers are specified, ' ..
@@ -1284,10 +1260,15 @@ if opts and type(opts) == 'table' then
         rspamd_config:register_symbol({
           type = 'virtual',
           name = s,
-          parent = id
+          parent = id,
+          score = 0, -- Default score
         })
         rule['symbols_set'][s] = 1
       end, rule['symbols'])
+    end
+    if not rule.score then
+      rspamd_logger.infox(rspamd_config, 'set default score 0 for multimap rule %s', rule.symbol)
+      rule.score = 0
     end
     if rule['score'] then
       -- Register metric symbol
@@ -1299,11 +1280,13 @@ if opts and type(opts) == 'table' then
     end
   end, fun.filter(function(r) return not r['prefilter'] end, rules))
 
-  fun.each(function(r)
+  -- prefilter symbils
+  fun.each(function(rule)
     rspamd_config:register_symbol({
       type = 'prefilter',
-      name = r['symbol'],
-      callback = gen_multimap_callback(r),
+      name = rule['symbol'],
+      score = rule.score or 0,
+      callback = gen_multimap_callback(rule),
     })
   end, fun.filter(function(r) return r['prefilter'] end, rules))
 

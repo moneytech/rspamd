@@ -47,6 +47,7 @@ LUA_FUNCTION_DEF (worker, add_control_handler);
 
 const luaL_reg worker_reg[] = {
 		LUA_INTERFACE_DEF (worker, get_name),
+		{"get_type", lua_worker_get_name},
 		LUA_INTERFACE_DEF (worker, get_stat),
 		LUA_INTERFACE_DEF (worker, get_index),
 		LUA_INTERFACE_DEF (worker, get_count),
@@ -745,7 +746,7 @@ rspamd_lua_subprocess_io (EV_P_ ev_io *w, int revents)
 			/* Write reply to the child */
 			rspamd_socket_blocking (cbdata->sp[0]);
 			memset (rep, 0, sizeof (rep));
-			(void)write (cbdata->sp[0], rep, sizeof (rep));
+			(void) !write (cbdata->sp[0], rep, sizeof (rep));
 		}
 	}
 }
@@ -757,7 +758,7 @@ lua_worker_spawn_process (lua_State *L)
 	struct rspamd_lua_process_cbdata *cbdata;
 	struct rspamd_abstract_worker_ctx *actx;
 	struct rspamd_srv_command srv_cmd;
-	const gchar *cmdline = NULL, *input = NULL;
+	const gchar *cmdline = NULL, *input = NULL, *proctitle = NULL;
 	gsize inputlen = 0;
 	pid_t pid;
 	GError *err = NULL;
@@ -765,8 +766,8 @@ lua_worker_spawn_process (lua_State *L)
 
 	if (!rspamd_lua_parse_table_arguments (L, 2, &err,
 			RSPAMD_LUA_PARSE_ARGUMENTS_DEFAULT,
-			"func=F;exec=S;stdin=V;*on_complete=F", &func_cbref,
-			&cmdline, &inputlen, &input, &cb_cbref)) {
+			"func=F;exec=S;stdin=V;*on_complete=F;proctitle=S", &func_cbref,
+			&cmdline, &inputlen, &input, &cb_cbref, &proctitle)) {
 		msg_err ("cannot get parameters list: %e", err);
 
 		if (err) {
@@ -785,7 +786,7 @@ lua_worker_spawn_process (lua_State *L)
 		cbdata->out_pos = 0;
 	}
 
-	if (rspamd_socketpair (cbdata->sp, TRUE) == -1) {
+	if (rspamd_socketpair (cbdata->sp, SOCK_STREAM) == -1) {
 		msg_err ("cannot spawn socketpair: %s", strerror (errno));
 		luaL_unref (L, LUA_REGISTRYINDEX, cbdata->func_cbref);
 		luaL_unref (L, LUA_REGISTRYINDEX, cbdata->cb_cbref);
@@ -817,7 +818,7 @@ lua_worker_spawn_process (lua_State *L)
 		gint rc;
 		gchar inbuf[4];
 
-		rspamd_log_update_pid (w->cf->type, w->srv->logger);
+		rspamd_log_on_fork (w->cf->type, w->srv->cfg, w->srv->logger);
 		rc = ottery_init (w->srv->cfg->libs_ctx->ottery_cfg);
 
 		if (rc != OTTERY_ERR_NONE) {
@@ -834,6 +835,14 @@ lua_worker_spawn_process (lua_State *L)
 		rspamd_socket_blocking (cbdata->sp[1]);
 		g_hash_table_remove_all (w->signal_events);
 		ev_loop_destroy (cbdata->event_loop);
+
+		if (proctitle) {
+			setproctitle ("lua process: %s", proctitle);
+		}
+		else {
+			setproctitle ("lua process: unnamed");
+		}
+
 		cbdata->event_loop = ev_loop_new (EVFLAG_SIGNALFD);
 		rspamd_worker_unblock_signals ();
 		rspamd_lua_execute_lua_subprocess (L, cbdata);
